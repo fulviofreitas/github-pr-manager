@@ -105,25 +105,10 @@ Required permissions:
 
 ## 🎨 Screenshots
 
-<details>
-<summary>📸 Click to view</summary>
-
-### Welcome Screen
-The clean welcome screen guides you through the process.
-<img width="936" height="686" alt="image" src="https://github.com/user-attachments/assets/e8e46b9d-165e-4ba2-93f3-c5afe71c2f18" />
-
-
-### PR List View
-Browse all open PRs with compact or expanded views.
-<img width="937" height="747" alt="image" src="https://github.com/user-attachments/assets/6760edfb-83fe-4b78-aa86-84eabbf646f0" />
-
-
-### Approval Modal
-Approve multiple PRs with custom comments and label management.
-<img width="923" height="941" alt="image" src="https://github.com/user-attachments/assets/50d404ea-a8a9-40de-bf20-82bbd06a225b" />
-
-
-</details>
+| Welcome Screen | PR List View | Approval Modal |
+|:--------------:|:------------:|:--------------:|
+| <img width="300" alt="Welcome Screen" src="https://github.com/user-attachments/assets/e8e46b9d-165e-4ba2-93f3-c5afe71c2f18" /> | <img width="300" alt="PR List View" src="https://github.com/user-attachments/assets/6760edfb-83fe-4b78-aa86-84eabbf646f0" /> | <img width="300" alt="Approval Modal" src="https://github.com/user-attachments/assets/50d404ea-a8a9-40de-bf20-82bbd06a225b" /> |
+| The clean welcome screen guides you through the process | Browse all open PRs with compact or expanded views | Approve multiple PRs with custom comments and label management |
 
 ---
 
