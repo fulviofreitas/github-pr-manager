@@ -1,0 +1,1921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PR Approver — Bulk Approve GitHub Pull Requests</title>
+    <meta name="description" content="Quickly approve GitHub PRs and manage review labels. No installation required.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✅</text></svg>">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsrsasign/11.1.0/jsrsasign-all-min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+:root {
+    --bg0: #0d1117;
+    --bg1: #161b22;
+    --bg2: #21262d;
+    --bg3: #30363d;
+    --bg4: #484f58;
+    --hover: #1f2937;
+    --border: #30363d;
+    --border2: #21262d;
+    --t0: #f0f6fc;
+    --t1: #c9d1d9;
+    --t2: #8b949e;
+    --t3: #6e7681;
+    --acc: #58a6ff;
+    --acc2: #388bfd;
+    --accbg: rgba(88, 166, 255, 0.1);
+    --green: #3fb950;
+    --green-bg: rgba(63, 185, 80, 0.15);
+    --red: #f85149;
+    --red-bg: rgba(248, 81, 73, 0.15);
+    --orange: #d29922;
+    --orange-bg: rgba(210, 153, 34, 0.15);
+    --purple: #a371f7;
+    --purple-bg: rgba(163, 113, 247, 0.15);
+    --cyan: #39c5cf;
+    --pink: #db61a2;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'IBM Plex Mono', monospace;
+    background: var(--bg0);
+    color: var(--t0);
+    min-height: 100vh;
+}
+
+.app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+/* Header */
+.header {
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-mark {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, var(--green), var(--acc));
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+}
+
+.logo-text {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--green);
+}
+
+.logo-sub {
+    font-size: 11px;
+    color: var(--t3);
+    margin-left: 8px;
+}
+
+/* Input Group */
+.input-section {
+    display: flex;
+    gap: 12px;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.input-label {
+    font-size: 10px;
+    color: var(--t3);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.input-field {
+    padding: 10px 14px;
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--t0);
+    font-family: inherit;
+    font-size: 12px;
+    min-width: 280px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.input-field:focus {
+    outline: none;
+    border-color: var(--acc);
+    box-shadow: 0 0 0 3px var(--accbg);
+}
+
+.input-field.small {
+    min-width: 200px;
+}
+
+.input-field::placeholder {
+    color: var(--t3);
+}
+
+.btn {
+    padding: 10px 20px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--t1);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+    background: var(--bg4);
+    border-color: var(--acc);
+    color: var(--acc);
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn.primary {
+    background: var(--green);
+    color: var(--bg0);
+    border-color: var(--green);
+    font-weight: 600;
+}
+
+.btn.primary:hover:not(:disabled) {
+    background: #2ea043;
+    border-color: #2ea043;
+    color: var(--bg0);
+}
+
+.btn.danger {
+    background: var(--red-bg);
+    color: var(--red);
+    border-color: var(--red);
+}
+
+.btn.danger:hover:not(:disabled) {
+    background: var(--red);
+    color: white;
+}
+
+/* Main Content */
+.main {
+    flex: 1;
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+/* Welcome Screen */
+.welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 24px;
+    text-align: center;
+}
+
+.welcome-icon {
+    font-size: 64px;
+    margin-bottom: 24px;
+}
+
+.welcome-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--t0);
+    margin-bottom: 12px;
+}
+
+.welcome-desc {
+    font-size: 14px;
+    color: var(--t2);
+    max-width: 500px;
+    line-height: 1.6;
+}
+
+.welcome-steps {
+    display: flex;
+    gap: 24px;
+    margin-top: 48px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.welcome-step {
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    width: 200px;
+    text-align: center;
+}
+
+.step-num {
+    width: 32px;
+    height: 32px;
+    background: var(--accbg);
+    border: 1px solid var(--acc);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--acc);
+    margin: 0 auto 12px;
+}
+
+.step-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--t0);
+    margin-bottom: 8px;
+}
+
+.step-desc {
+    font-size: 11px;
+    color: var(--t3);
+    line-height: 1.5;
+}
+
+/* Loading */
+.loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 24px;
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--acc);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.loading-text {
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--t2);
+}
+
+/* Error */
+.error-box {
+    background: var(--red-bg);
+    border: 1px solid var(--red);
+    border-radius: 12px;
+    padding: 20px 24px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.error-icon {
+    font-size: 20px;
+}
+
+.error-content {
+    flex: 1;
+}
+
+.error-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--red);
+    margin-bottom: 4px;
+}
+
+.error-msg {
+    font-size: 12px;
+    color: var(--t2);
+}
+
+/* Stats Bar */
+.stats-bar {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.stat-card {
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    min-width: 140px;
+}
+
+.stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--acc);
+}
+
+.stat-label {
+    font-size: 10px;
+    color: var(--t3);
+    text-transform: uppercase;
+    margin-top: 4px;
+}
+
+.stat-card.needs-review .stat-value {
+    color: var(--orange);
+}
+
+.stat-card.success .stat-value {
+    color: var(--green);
+}
+
+/* PR List */
+.pr-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.pr-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--t0);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.pr-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.filter-btn {
+    padding: 8px 14px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--t2);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.filter-btn:hover, .filter-btn.active {
+    background: var(--accbg);
+    border-color: var(--acc);
+    color: var(--acc);
+}
+
+.auth-toggle {
+    display: flex;
+    gap: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.auth-toggle .filter-btn {
+    border-radius: 0;
+    border: none;
+    border-right: 1px solid var(--border);
+}
+
+.auth-toggle .filter-btn:last-child {
+    border-right: none;
+}
+
+.pr-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.pr-card {
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+
+.pr-card:hover {
+    border-color: var(--acc);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+.pr-card.selected {
+    border-color: var(--green);
+    background: var(--green-bg);
+}
+
+.pr-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    margin-bottom: 12px;
+}
+
+.pr-checkbox {
+    width: 20px;
+    height: 20px;
+    appearance: none;
+    background: var(--bg0);
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    position: relative;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.pr-checkbox:checked {
+    background: var(--green);
+    border-color: var(--green);
+}
+
+.pr-checkbox:checked::after {
+    content: '✓';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--bg0);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.pr-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.pr-number {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--acc);
+}
+
+.pr-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--t0);
+    margin-top: 4px;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.pr-meta {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--t3);
+}
+
+.pr-author {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.pr-author-avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+}
+
+.pr-labels {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.label {
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 10px;
+    font-weight: 600;
+    border: 1px solid transparent;
+}
+
+.label.needs-review {
+    background: var(--orange-bg);
+    color: var(--orange);
+    border-color: var(--orange);
+}
+
+.pr-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--t2);
+    margin-left: auto;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+}
+
+.status-dot.pending {
+    background: var(--orange);
+}
+
+/* Approval Modal */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 24px;
+}
+
+.modal {
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    max-width: 500px;
+    width: 100%;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--t3);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.modal-close:hover {
+    background: var(--bg3);
+    color: var(--t0);
+}
+
+.modal-body {
+    padding: 24px;
+    overflow-y: auto;
+}
+
+.modal-footer {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.approval-summary {
+    background: var(--bg0);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+.approval-count {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--green);
+}
+
+.approval-text {
+    font-size: 12px;
+    color: var(--t2);
+    margin-top: 4px;
+}
+
+.approval-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.approval-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg2);
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+.approval-item-status {
+    font-size: 14px;
+}
+
+.approval-item-name {
+    flex: 1;
+    color: var(--t1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.comment-input {
+    width: 100%;
+    padding: 12px;
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--t0);
+    font-family: inherit;
+    font-size: 12px;
+    resize: vertical;
+    min-height: 80px;
+    margin-top: 16px;
+}
+
+.comment-input:focus {
+    outline: none;
+    border-color: var(--acc);
+}
+
+.checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--t1);
+}
+
+.checkbox-group input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--green);
+}
+
+/* Toast */
+.toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 14px 20px;
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--t0);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 2000;
+    animation: slideIn 0.3s ease;
+}
+
+.toast.success {
+    border-color: var(--green);
+}
+
+.toast.error {
+    border-color: var(--red);
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 60px 24px;
+    color: var(--t3);
+}
+
+.empty-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+}
+
+.empty-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--t2);
+    margin-bottom: 8px;
+}
+
+.empty-desc {
+    font-size: 12px;
+}
+
+/* Progress */
+.progress-bar {
+    height: 4px;
+    background: var(--bg3);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 16px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--green);
+    transition: width 0.3s;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .header {
+        padding: 12px 16px;
+    }
+    
+    .input-field {
+        min-width: 100%;
+    }
+    
+    .input-field.small {
+        min-width: 100%;
+    }
+    
+    .main {
+        padding: 16px;
+    }
+    
+    .welcome-steps {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .stats-bar {
+        flex-direction: column;
+    }
+    
+    .stat-card {
+        width: 100%;
+    }
+}
+    </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+// GitHub API helper
+const GitHubAPI = {
+    baseUrl: 'https://api.github.com',
+    
+    parseRepoInput(input) {
+        // Handle various formats:
+        // - owner/repo
+        // - https://github.com/owner/repo
+        // - github.com/owner/repo
+        // - https://github.com/owner/repo/pulls
+        const cleaned = input.trim().replace(/\/$/, '');
+        
+        // Try URL format
+        const urlMatch = cleaned.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/]+)\/([^\/]+)/);
+        if (urlMatch) {
+            return { owner: urlMatch[1], repo: urlMatch[2].replace(/\.git$/, '') };
+        }
+        
+        // Try owner/repo format
+        const simpleMatch = cleaned.match(/^([^\/]+)\/([^\/]+)$/);
+        if (simpleMatch) {
+            return { owner: simpleMatch[1], repo: simpleMatch[2] };
+        }
+        
+        return null;
+    },
+    
+    async request(endpoint, token, options = {}) {
+        const headers = {
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+            ...options.headers,
+        };
+        
+        // Only add Authorization header if token is provided
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        }
+        
+        // Add Content-Type for requests with body
+        if (options.body) {
+            headers['Content-Type'] = 'application/json';
+        }
+        
+        console.log(`[GitHub API] ${options.method || 'GET'} ${endpoint}`);
+        
+        const response = await fetch(`${this.baseUrl}${endpoint}`, {
+            ...options,
+            headers,
+        });
+        
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            console.error(`[GitHub API] Error:`, error);
+            throw new Error(error.message || `GitHub API error: ${response.status}`);
+        }
+        
+        if (response.status === 204) return null;
+        return response.json();
+    },
+    
+    async getPullRequests(owner, repo, state = 'open') {
+        // Public endpoint - no token required
+        return this.request(`/repos/${owner}/${repo}/pulls?state=${state}&per_page=100`, null);
+    },
+    
+    async getPullRequestReviews(owner, repo, prNumber) {
+        // Public endpoint - no token required
+        return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, null);
+    },
+    
+    async approvePR(owner, repo, prNumber, token, comment = '') {
+        return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, token, {
+            method: 'POST',
+            body: JSON.stringify({
+                event: 'APPROVE',
+                body: comment || 'Approved via PR Approver tool ✅',
+            }),
+        });
+    },
+    
+    async removeLabel(owner, repo, issueNumber, labelName, token) {
+        try {
+            return this.request(
+                `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(labelName)}`,
+                token,
+                { method: 'DELETE' }
+            );
+        } catch (e) {
+            // Label might not exist, that's okay
+            console.warn(`Could not remove label ${labelName}:`, e.message);
+            return null;
+        }
+    },
+    
+    async validateToken(token) {
+        return this.request('/user', token);
+    },
+    
+    generateJWT(appId, privateKey) {
+        // Create JWT for GitHub App authentication
+        const now = Math.floor(Date.now() / 1000);
+        const payload = {
+            iat: now - 60, // Issued 60 seconds ago to account for clock drift
+            exp: now + (10 * 60), // Expires in 10 minutes (max allowed)
+            iss: String(appId),
+        };
+        
+        const header = { alg: 'RS256', typ: 'JWT' };
+        
+        console.log('[GitHub App] Generating JWT for App ID:', appId);
+        
+        try {
+            // Use jsrsasign to sign the JWT
+            const jwt = KJUR.jws.JWS.sign('RS256', JSON.stringify(header), JSON.stringify(payload), privateKey);
+            console.log('[GitHub App] JWT generated successfully');
+            return jwt;
+        } catch (e) {
+            console.error('[GitHub App] JWT generation failed:', e);
+            throw new Error(`Failed to generate JWT: ${e.message}. Make sure the private key is in valid PEM format.`);
+        }
+    },
+    
+    async getAppInstallations(jwt) {
+        console.log('[GitHub API] Getting app installations');
+        const response = await fetch(`${this.baseUrl}/app/installations`, {
+            headers: {
+                'Accept': 'application/vnd.github+json',
+                'Authorization': `Bearer ${jwt}`,
+                'X-GitHub-Api-Version': '2022-11-28',
+            },
+        });
+        
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            console.error('[GitHub API] Get installations error:', error);
+            throw new Error(error.message || `Failed to get installations: ${response.status}`);
+        }
+        
+        const installations = await response.json();
+        console.log(`[GitHub API] Found ${installations.length} installation(s)`);
+        return installations;
+    },
+    
+    async getInstallationToken(jwt, installationId) {
+        console.log(`[GitHub API] Getting installation token for installation ${installationId}`);
+        const response = await fetch(`${this.baseUrl}/app/installations/${installationId}/access_tokens`, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/vnd.github+json',
+                'Authorization': `Bearer ${jwt}`,
+                'X-GitHub-Api-Version': '2022-11-28',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+        });
+        
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            console.error(`[GitHub API] Installation token error:`, error);
+            throw new Error(error.message || `Failed to get installation token: ${response.status}`);
+        }
+        
+        return response.json();
+    },
+    
+    async getInstallationForRepo(jwt, owner, repo) {
+        // Try to get the installation for this specific repo
+        try {
+            const response = await fetch(`${this.baseUrl}/repos/${owner}/${repo}/installation`, {
+                headers: {
+                    'Accept': 'application/vnd.github+json',
+                    'Authorization': `Bearer ${jwt}`,
+                    'X-GitHub-Api-Version': '2022-11-28',
+                },
+            });
+            
+            if (response.ok) {
+                return response.json();
+            }
+        } catch (e) {
+            // Fall through to get all installations
+        }
+        
+        // If that fails, get all installations and find a matching one
+        const installations = await this.getAppInstallations(jwt);
+        if (installations.length === 0) {
+            throw new Error('No installations found for this GitHub App');
+        }
+        
+        // Return the first installation (user might need to select if multiple)
+        return installations[0];
+    },
+    
+    async authenticateAsApp(appId, privateKey, owner, repo) {
+        const jwt = this.generateJWT(appId, privateKey);
+        const installation = await this.getInstallationForRepo(jwt, owner, repo);
+        const tokenData = await this.getInstallationToken(jwt, installation.id);
+        return {
+            token: tokenData.token,
+            expiresAt: tokenData.expires_at,
+            installation: installation,
+        };
+    },
+};
+
+function App() {
+    const [repoInput, setRepoInput] = useState('');
+    const [token, setToken] = useState(() => localStorage.getItem('gh_token') || '');
+    const [repo, setRepo] = useState(null);
+    const [prs, setPRs] = useState([]);
+    const [selectedPRs, setSelectedPRs] = useState(new Set());
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [toast, setToast] = useState(null);
+    const [showModal, setShowModal] = useState(false);
+    const [approving, setApproving] = useState(false);
+    const [approvalProgress, setApprovalProgress] = useState({ current: 0, total: 0, results: [] });
+    const [approvalComment, setApprovalComment] = useState('');
+    const [removeNeedsReview, setRemoveNeedsReview] = useState(true);
+    const [filterNeedsReview, setFilterNeedsReview] = useState(false);
+    const [filterMissingApproval, setFilterMissingApproval] = useState(true);
+    const [prReviews, setPrReviews] = useState({}); // { prNumber: { approved: boolean, approvers: [] } }
+    const [loadingReviews, setLoadingReviews] = useState(false);
+    const [user, setUser] = useState(null);
+    
+    // Auth type: 'pat' or 'github_app'
+    const [authType, setAuthType] = useState(() => localStorage.getItem('gh_auth_type') || 'pat');
+    const [appId, setAppId] = useState(() => localStorage.getItem('gh_app_id') || '');
+    const [privateKey, setPrivateKey] = useState(() => localStorage.getItem('gh_private_key') || '');
+    const [appToken, setAppToken] = useState(null);
+    const [appTokenLoading, setAppTokenLoading] = useState(false);
+    const [appError, setAppError] = useState(null);
+
+    // Show toast notification
+    const showToast = useCallback((message, type = 'success') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 4000);
+    }, []);
+
+    // Save settings to localStorage
+    useEffect(() => {
+        if (token) localStorage.setItem('gh_token', token);
+    }, [token]);
+    
+    useEffect(() => {
+        localStorage.setItem('gh_auth_type', authType);
+    }, [authType]);
+    
+    useEffect(() => {
+        if (appId) localStorage.setItem('gh_app_id', appId);
+    }, [appId]);
+    
+    useEffect(() => {
+        if (privateKey) localStorage.setItem('gh_private_key', privateKey);
+    }, [privateKey]);
+
+    // Validate PAT token and get user
+    useEffect(() => {
+        if (authType === 'pat' && token) {
+            GitHubAPI.validateToken(token)
+                .then(setUser)
+                .catch(() => setUser(null));
+        } else if (authType === 'pat') {
+            setUser(null);
+        }
+    }, [token, authType]);
+    
+    // Get GitHub App installation token when needed
+    const getAppToken = async () => {
+        if (!appId || !privateKey || !repo) {
+            setAppError('App ID, Private Key, and repository are required');
+            return null;
+        }
+        
+        setAppTokenLoading(true);
+        setAppError(null);
+        
+        try {
+            const result = await GitHubAPI.authenticateAsApp(appId, privateKey, repo.owner, repo.repo);
+            setAppToken(result);
+            return result.token;
+        } catch (e) {
+            setAppError(e.message);
+            setAppToken(null);
+            return null;
+        } finally {
+            setAppTokenLoading(false);
+        }
+    };
+    
+    // Get the current auth token for API calls
+    const getAuthToken = async () => {
+        if (authType === 'pat') {
+            return token;
+        } else {
+            // Check if we have a valid app token
+            if (appToken && new Date(appToken.expiresAt) > new Date()) {
+                return appToken.token;
+            }
+            // Get a new app token
+            return await getAppToken();
+        }
+    };
+    
+    // Check if auth is configured
+    const isAuthConfigured = () => {
+        if (authType === 'pat') {
+            return !!token.trim();
+        } else {
+            return !!appId.trim() && !!privateKey.trim();
+        }
+    };
+
+    // Fetch reviews for all PRs
+    const fetchReviews = async (owner, repo, pullRequests) => {
+        setLoadingReviews(true);
+        const reviews = {};
+        
+        // Fetch reviews in parallel (batch of 5 to avoid rate limiting)
+        const batchSize = 5;
+        for (let i = 0; i < pullRequests.length; i += batchSize) {
+            const batch = pullRequests.slice(i, i + batchSize);
+            const results = await Promise.all(
+                batch.map(async (pr) => {
+                    try {
+                        const prReviews = await GitHubAPI.getPullRequestReviews(owner, repo, pr.number);
+                        // Get the latest review state per user
+                        const reviewerStates = {};
+                        prReviews.forEach(review => {
+                            if (review.state !== 'COMMENTED' && review.state !== 'PENDING') {
+                                reviewerStates[review.user.login] = {
+                                    state: review.state,
+                                    user: review.user,
+                                    submitted_at: review.submitted_at
+                                };
+                            }
+                        });
+                        
+                        const approvers = Object.values(reviewerStates)
+                            .filter(r => r.state === 'APPROVED')
+                            .map(r => r.user);
+                        
+                        const hasChangesRequested = Object.values(reviewerStates)
+                            .some(r => r.state === 'CHANGES_REQUESTED');
+                        
+                        return {
+                            prNumber: pr.number,
+                            approved: approvers.length > 0,
+                            approvers,
+                            hasChangesRequested,
+                            reviewCount: Object.keys(reviewerStates).length
+                        };
+                    } catch (e) {
+                        console.error(`Failed to fetch reviews for PR #${pr.number}:`, e);
+                        return { prNumber: pr.number, approved: false, approvers: [], hasChangesRequested: false, reviewCount: 0 };
+                    }
+                })
+            );
+            
+            results.forEach(r => {
+                reviews[r.prNumber] = r;
+            });
+        }
+        
+        setPrReviews(reviews);
+        setLoadingReviews(false);
+        return reviews;
+    };
+
+    // Fetch PRs
+    const fetchPRs = async () => {
+        if (!repoInput.trim()) {
+            setError('Please enter a repository');
+            return;
+        }
+
+        const parsed = GitHubAPI.parseRepoInput(repoInput);
+        if (!parsed) {
+            setError('Invalid repository format. Use: owner/repo or GitHub URL');
+            return;
+        }
+
+        setLoading(true);
+        setError(null);
+        setRepo(parsed);
+        setPRs([]);
+        setSelectedPRs(new Set());
+        setPrReviews({});
+
+        try {
+            // Fetch PRs without authentication (public endpoint)
+            const pullRequests = await GitHubAPI.getPullRequests(parsed.owner, parsed.repo);
+            setPRs(pullRequests);
+            
+            if (pullRequests.length === 0) {
+                showToast('No open pull requests found', 'success');
+            } else {
+                // Fetch reviews for all PRs
+                await fetchReviews(parsed.owner, parsed.repo, pullRequests);
+            }
+        } catch (e) {
+            setError(e.message);
+            setRepo(null);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Toggle PR selection
+    const togglePR = (prNumber) => {
+        const newSelected = new Set(selectedPRs);
+        if (newSelected.has(prNumber)) {
+            newSelected.delete(prNumber);
+        } else {
+            newSelected.add(prNumber);
+        }
+        setSelectedPRs(newSelected);
+    };
+
+    // Select all / none
+    const selectAll = () => {
+        const filtered = getFilteredPRs();
+        if (selectedPRs.size === filtered.length) {
+            setSelectedPRs(new Set());
+        } else {
+            setSelectedPRs(new Set(filtered.map(pr => pr.number)));
+        }
+    };
+
+    // Get filtered PRs
+    const getFilteredPRs = () => {
+        let filtered = prs;
+        
+        if (filterMissingApproval) {
+            filtered = filtered.filter(pr => {
+                const review = prReviews[pr.number];
+                return !review || !review.approved;
+            });
+        }
+        
+        if (filterNeedsReview) {
+            filtered = filtered.filter(pr => 
+                pr.labels.some(l => l.name.toLowerCase() === 'needs-review')
+            );
+        }
+        
+        return filtered;
+    };
+    
+    // Count PRs missing approval
+    const missingApprovalCount = prs.filter(pr => {
+        const review = prReviews[pr.number];
+        return !review || !review.approved;
+    }).length;
+
+    // Approve selected PRs
+    const approveSelected = async () => {
+        if (selectedPRs.size === 0) return;
+        
+        // Get auth token first
+        const authToken = await getAuthToken();
+        if (!authToken) {
+            showToast('Authentication failed. Please check your credentials.', 'error');
+            return;
+        }
+
+        setApproving(true);
+        setApprovalProgress({ current: 0, total: selectedPRs.size, results: [] });
+
+        const prNumbers = Array.from(selectedPRs);
+        const results = [];
+
+        for (let i = 0; i < prNumbers.length; i++) {
+            const prNumber = prNumbers[i];
+            const pr = prs.find(p => p.number === prNumber);
+            
+            try {
+                // Approve the PR
+                await GitHubAPI.approvePR(repo.owner, repo.repo, prNumber, authToken, approvalComment);
+                
+                // Remove needs-review label if requested
+                if (removeNeedsReview) {
+                    await GitHubAPI.removeLabel(repo.owner, repo.repo, prNumber, 'needs-review', authToken);
+                }
+                
+                results.push({ prNumber, title: pr?.title, success: true });
+            } catch (e) {
+                results.push({ prNumber, title: pr?.title, success: false, error: e.message });
+            }
+
+            setApprovalProgress({ current: i + 1, total: prNumbers.length, results });
+        }
+
+        const successCount = results.filter(r => r.success).length;
+        showToast(`Approved ${successCount} of ${results.length} PRs`, successCount === results.length ? 'success' : 'error');
+        
+        // Refresh PRs
+        if (repo) {
+            try {
+                const pullRequests = await GitHubAPI.getPullRequests(repo.owner, repo.repo);
+                setPRs(pullRequests);
+            } catch (e) {
+                console.error('Failed to refresh PRs:', e);
+            }
+        }
+
+        setSelectedPRs(new Set());
+        setApproving(false);
+        setShowModal(false);
+    };
+
+    const filteredPRs = getFilteredPRs();
+    const needsReviewCount = prs.filter(pr => 
+        pr.labels.some(l => l.name.toLowerCase() === 'needs-review')
+    ).length;
+
+    return (
+        <div className="app">
+            {/* Header */}
+            <header className="header">
+                <div className="logo">
+                    <div className="logo-mark">✓</div>
+                    <span className="logo-text">PR Approver</span>
+                    <span className="logo-sub">Bulk approve GitHub PRs</span>
+                </div>
+
+                <div className="input-section">
+                    <div className="input-group">
+                        <label className="input-label">Repository</label>
+                        <input
+                            type="text"
+                            className="input-field"
+                            placeholder="owner/repo or GitHub URL"
+                            value={repoInput}
+                            onChange={(e) => setRepoInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && fetchPRs()}
+                        />
+                    </div>
+
+                    <button className="btn primary" onClick={fetchPRs} disabled={loading}>
+                        {loading ? '⏳' : '🔍'} Load PRs
+                    </button>
+
+                    {(user || appToken) && (
+                        <div style={{ 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            gap: 8, 
+                            padding: '8px 12px',
+                            background: 'var(--green-bg)',
+                            borderRadius: 8,
+                            fontSize: 11,
+                            color: 'var(--green)'
+                        }}>
+                            {user ? (
+                                <>✓ Signed in as <strong>{user.login}</strong></>
+                            ) : (
+                                <>🤖 GitHub App authenticated</>
+                            )}
+                        </div>
+                    )}
+                </div>
+            </header>
+
+            {/* Main Content */}
+            <main className="main">
+                {error && (
+                    <div className="error-box">
+                        <span className="error-icon">⚠️</span>
+                        <div className="error-content">
+                            <div className="error-title">Error</div>
+                            <div className="error-msg">{error}</div>
+                        </div>
+                        <button className="btn" onClick={() => setError(null)} style={{ marginLeft: 'auto' }}>Dismiss</button>
+                    </div>
+                )}
+
+                {!repo && !loading && (
+                    <div className="welcome">
+                        <div className="welcome-icon">🚀</div>
+                        <h1 className="welcome-title">Welcome to PR Approver</h1>
+                        <p className="welcome-desc">
+                            Quickly approve multiple GitHub pull requests and automatically remove the <code>needs-review</code> label. Perfect for maintainers managing busy repositories.
+                        </p>
+                        <div className="welcome-steps">
+                            <div className="welcome-step">
+                                <div className="step-num">1</div>
+                                <div className="step-title">Enter Repository</div>
+                                <div className="step-desc">Paste the GitHub URL or enter owner/repo format</div>
+                            </div>
+                            <div className="welcome-step">
+                                <div className="step-num">2</div>
+                                <div className="step-title">Browse PRs</div>
+                                <div className="step-desc">View open PRs and their labels — no login needed</div>
+                            </div>
+                            <div className="welcome-step">
+                                <div className="step-num">3</div>
+                                <div className="step-title">Approve PRs</div>
+                                <div className="step-desc">Enter your PAT to approve and remove labels</div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {loading && (
+                    <div className="loading">
+                        <div className="spinner" />
+                        <div className="loading-text">Loading pull requests...</div>
+                    </div>
+                )}
+
+                {loadingReviews && !loading && (
+                    <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        padding: '12px 16px',
+                        background: 'var(--bg1)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 8,
+                        marginBottom: 16,
+                        fontSize: 12,
+                        color: 'var(--t2)'
+                    }}>
+                        <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+                        Fetching review status for {prs.length} PRs...
+                    </div>
+                )}
+
+                {repo && !loading && (
+                    <>
+                        {/* Stats */}
+                        <div className="stats-bar">
+                            <div className="stat-card">
+                                <div className="stat-value">{prs.length}</div>
+                                <div className="stat-label">Open PRs</div>
+                            </div>
+                            <div className="stat-card needs-review">
+                                <div className="stat-value">
+                                    {loadingReviews ? '...' : missingApprovalCount}
+                                </div>
+                                <div className="stat-label">Missing Approval</div>
+                            </div>
+                            <div className="stat-card">
+                                <div className="stat-value">{needsReviewCount}</div>
+                                <div className="stat-label">needs-review label</div>
+                            </div>
+                            <div className="stat-card success">
+                                <div className="stat-value">{selectedPRs.size}</div>
+                                <div className="stat-label">Selected</div>
+                            </div>
+                        </div>
+
+                        {/* PR List Header */}
+                        <div className="pr-header">
+                            <h2 className="pr-title">
+                                📋 Pull Requests
+                                <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--t3)' }}>
+                                    {repo.owner}/{repo.repo}
+                                </span>
+                            </h2>
+                            <div className="pr-actions">
+                                <button
+                                    className={`filter-btn ${filterMissingApproval ? 'active' : ''}`}
+                                    onClick={() => setFilterMissingApproval(!filterMissingApproval)}
+                                    disabled={loadingReviews}
+                                >
+                                    ⏳ Missing Approval ({loadingReviews ? '...' : missingApprovalCount})
+                                </button>
+                                <button
+                                    className={`filter-btn ${filterNeedsReview ? 'active' : ''}`}
+                                    onClick={() => setFilterNeedsReview(!filterNeedsReview)}
+                                >
+                                    🏷️ needs-review ({needsReviewCount})
+                                </button>
+                                <button className="btn" onClick={selectAll}>
+                                    {selectedPRs.size === filteredPRs.length && filteredPRs.length > 0 ? '☐ Deselect All' : '☑ Select All'}
+                                </button>
+                                <button
+                                    className="btn primary"
+                                    onClick={() => setShowModal(true)}
+                                    disabled={selectedPRs.size === 0}
+                                >
+                                    ✅ Approve Selected ({selectedPRs.size})
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* PR List */}
+                        {filteredPRs.length === 0 ? (
+                            <div className="empty-state">
+                                <div className="empty-icon">📭</div>
+                                <div className="empty-title">No pull requests found</div>
+                                <div className="empty-desc">
+                                    {filterNeedsReview 
+                                        ? 'No PRs with the needs-review label'
+                                        : 'This repository has no open pull requests'}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="pr-list">
+                                {filteredPRs.map(pr => (
+                                    <div
+                                        key={pr.number}
+                                        className={`pr-card ${selectedPRs.has(pr.number) ? 'selected' : ''}`}
+                                        onClick={() => togglePR(pr.number)}
+                                    >
+                                        <div className="pr-card-header">
+                                            <input
+                                                type="checkbox"
+                                                className="pr-checkbox"
+                                                checked={selectedPRs.has(pr.number)}
+                                                onChange={() => {}}
+                                            />
+                                            <div className="pr-info">
+                                                <span className="pr-number">#{pr.number}</span>
+                                                <div className="pr-name">{pr.title}</div>
+                                                <div className="pr-meta">
+                                                    <span className="pr-author">
+                                                        <img 
+                                                            src={pr.user.avatar_url} 
+                                                            alt={pr.user.login}
+                                                            className="pr-author-avatar"
+                                                        />
+                                                        {pr.user.login}
+                                                    </span>
+                                                    <span>📅 {new Date(pr.created_at).toLocaleDateString()}</span>
+                                                    <span>💬 {pr.comments || 0}</span>
+                                                    <span>📝 +{pr.additions || 0} -{pr.deletions || 0}</span>
+                                                    {prReviews[pr.number] && (
+                                                        <span style={{
+                                                            padding: '2px 8px',
+                                                            borderRadius: 12,
+                                                            fontSize: 10,
+                                                            fontWeight: 600,
+                                                            background: prReviews[pr.number].approved 
+                                                                ? 'var(--green-bg)' 
+                                                                : prReviews[pr.number].hasChangesRequested 
+                                                                    ? 'var(--red-bg)'
+                                                                    : 'var(--orange-bg)',
+                                                            color: prReviews[pr.number].approved 
+                                                                ? 'var(--green)' 
+                                                                : prReviews[pr.number].hasChangesRequested 
+                                                                    ? 'var(--red)'
+                                                                    : 'var(--orange)',
+                                                        }}>
+                                                            {prReviews[pr.number].approved 
+                                                                ? `✓ Approved (${prReviews[pr.number].approvers.length})`
+                                                                : prReviews[pr.number].hasChangesRequested
+                                                                    ? '✗ Changes requested'
+                                                                    : '⏳ Awaiting review'}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                {pr.labels.length > 0 && (
+                                                    <div className="pr-labels">
+                                                        {pr.labels.map(label => (
+                                                            <span
+                                                                key={label.id}
+                                                                className={`label ${label.name.toLowerCase() === 'needs-review' ? 'needs-review' : ''}`}
+                                                                style={{
+                                                                    backgroundColor: `#${label.color}22`,
+                                                                    color: `#${label.color}`,
+                                                                    borderColor: `#${label.color}`,
+                                                                }}
+                                                            >
+                                                                {label.name}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <a
+                                                href={pr.html_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="btn"
+                                                onClick={(e) => e.stopPropagation()}
+                                                style={{ fontSize: 11 }}
+                                            >
+                                                🔗 View
+                                            </a>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </>
+                )}
+            </main>
+
+            {/* Approval Modal */}
+            {showModal && (
+                <div className="modal-overlay" onClick={() => !approving && setShowModal(false)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <span className="modal-title">✅ Approve Pull Requests</span>
+                            {!approving && (
+                                <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+                            )}
+                        </div>
+                        <div className="modal-body">
+                            <div className="approval-summary">
+                                <div className="approval-count">{selectedPRs.size}</div>
+                                <div className="approval-text">pull requests will be approved</div>
+                            </div>
+
+                            {approving && (
+                                <>
+                                    <div className="progress-bar">
+                                        <div 
+                                            className="progress-fill"
+                                            style={{ width: `${(approvalProgress.current / approvalProgress.total) * 100}%` }}
+                                        />
+                                    </div>
+                                    <div style={{ fontSize: 12, color: 'var(--t2)', marginTop: 8, textAlign: 'center' }}>
+                                        Processing {approvalProgress.current} of {approvalProgress.total}...
+                                    </div>
+                                    <div className="approval-list" style={{ marginTop: 16 }}>
+                                        {approvalProgress.results.map((r, i) => (
+                                            <div key={i} className="approval-item" style={{ 
+                                                flexDirection: 'column', 
+                                                alignItems: 'flex-start',
+                                                background: r.success ? 'var(--bg2)' : 'var(--red-bg)'
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
+                                                    <span className="approval-item-status">
+                                                        {r.success ? '✅' : '❌'}
+                                                    </span>
+                                                    <span className="approval-item-name">
+                                                        #{r.prNumber} {r.title}
+                                                    </span>
+                                                </div>
+                                                {r.error && (
+                                                    <div style={{ 
+                                                        fontSize: 10, 
+                                                        color: 'var(--red)', 
+                                                        marginTop: 6,
+                                                        marginLeft: 24,
+                                                        wordBreak: 'break-word'
+                                                    }}>
+                                                        Error: {r.error}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+
+                            {!approving && (
+                                <>
+                                    <div className="approval-list">
+                                        {Array.from(selectedPRs).map(prNumber => {
+                                            const pr = prs.find(p => p.number === prNumber);
+                                            return (
+                                                <div key={prNumber} className="approval-item">
+                                                    <span className="approval-item-status">📋</span>
+                                                    <span className="approval-item-name">
+                                                        #{prNumber} {pr?.title}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Auth Type Selector */}
+                                    <div style={{ marginTop: 20 }}>
+                                        <label className="input-label" style={{ marginBottom: 8, display: 'block' }}>
+                                            🔐 Authentication Method
+                                        </label>
+                                        <div style={{ display: 'flex', gap: 8 }}>
+                                            <button
+                                                className={`filter-btn ${authType === 'pat' ? 'active' : ''}`}
+                                                onClick={() => setAuthType('pat')}
+                                                style={{ flex: 1, justifyContent: 'center' }}
+                                            >
+                                                🔑 Personal Access Token
+                                            </button>
+                                            <button
+                                                className={`filter-btn ${authType === 'github_app' ? 'active' : ''}`}
+                                                onClick={() => setAuthType('github_app')}
+                                                style={{ flex: 1, justifyContent: 'center' }}
+                                            >
+                                                🤖 GitHub App
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* PAT Input */}
+                                    {authType === 'pat' && (
+                                        <div style={{ marginTop: 16 }}>
+                                            <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                                Personal Access Token
+                                                {user && <span style={{ color: 'var(--green)', marginLeft: 8 }}>✓ {user.login}</span>}
+                                            </label>
+                                            <input
+                                                type="password"
+                                                className="input-field"
+                                                style={{ width: '100%', minWidth: 'unset' }}
+                                                placeholder="ghp_xxxxxxxxxxxx"
+                                                value={token}
+                                                onChange={(e) => setToken(e.target.value)}
+                                            />
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8 }}>
+                                                <button 
+                                                    className="btn"
+                                                    onClick={async () => {
+                                                        try {
+                                                            const userData = await GitHubAPI.validateToken(token);
+                                                            setUser(userData);
+                                                            showToast(`Authenticated as ${userData.login}`, 'success');
+                                                        } catch (e) {
+                                                            setUser(null);
+                                                            showToast(`Authentication failed: ${e.message}`, 'error');
+                                                        }
+                                                    }}
+                                                    disabled={!token}
+                                                    style={{ fontSize: 11 }}
+                                                >
+                                                    🔄 Test Token
+                                                </button>
+                                                <span style={{ fontSize: 10, color: 'var(--t3)' }}>
+                                                    Requires <code style={{ background: 'var(--bg3)', padding: '1px 4px', borderRadius: 3 }}>repo</code> scope. 
+                                                    <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--acc)', marginLeft: 4 }}>
+                                                        Create token →
+                                                    </a>
+                                                </span>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* GitHub App Input */}
+                                    {authType === 'github_app' && (
+                                        <div style={{ marginTop: 16 }}>
+                                            <div style={{ marginBottom: 12 }}>
+                                                <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                                    App ID
+                                                    {appToken && <span style={{ color: 'var(--green)', marginLeft: 8 }}>✓ Authenticated</span>}
+                                                </label>
+                                                <input
+                                                    type="text"
+                                                    className="input-field"
+                                                    style={{ width: '100%', minWidth: 'unset' }}
+                                                    placeholder="123456"
+                                                    value={appId}
+                                                    onChange={(e) => setAppId(e.target.value)}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                                    Private Key (PEM format)
+                                                </label>
+                                                <textarea
+                                                    className="input-field"
+                                                    style={{ 
+                                                        width: '100%', 
+                                                        minWidth: 'unset', 
+                                                        minHeight: 120, 
+                                                        fontFamily: 'monospace',
+                                                        fontSize: 10,
+                                                        resize: 'vertical'
+                                                    }}
+                                                    placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"
+                                                    value={privateKey}
+                                                    onChange={(e) => setPrivateKey(e.target.value)}
+                                                />
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10 }}>
+                                                <button 
+                                                    className="btn"
+                                                    onClick={getAppToken}
+                                                    disabled={!appId || !privateKey || !repo || appTokenLoading}
+                                                    style={{ fontSize: 11 }}
+                                                >
+                                                    {appTokenLoading ? '⏳ Testing...' : '🔄 Test Connection'}
+                                                </button>
+                                                <span style={{ fontSize: 10, color: 'var(--t3)' }}>
+                                                    The app must be installed on the repository. 
+                                                    <a href="https://docs.github.com/en/apps/creating-github-apps" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--acc)', marginLeft: 4 }}>
+                                                        Learn more →
+                                                    </a>
+                                                </span>
+                                            </div>
+                                            
+                                            {appError && (
+                                                <div style={{ 
+                                                    marginTop: 12, 
+                                                    padding: '10px 12px', 
+                                                    background: 'var(--red-bg)', 
+                                                    border: '1px solid var(--red)',
+                                                    borderRadius: 6,
+                                                    fontSize: 11,
+                                                    color: 'var(--red)',
+                                                    wordBreak: 'break-word'
+                                                }}>
+                                                    ⚠️ {appError}
+                                                </div>
+                                            )}
+                                            
+                                            {appToken && (
+                                                <div style={{ 
+                                                    marginTop: 12, 
+                                                    padding: '10px 12px', 
+                                                    background: 'var(--green-bg)', 
+                                                    border: '1px solid var(--green)',
+                                                    borderRadius: 6,
+                                                    fontSize: 11,
+                                                    color: 'var(--green)'
+                                                }}>
+                                                    ✓ Authenticated as GitHub App (expires {new Date(appToken.expiresAt).toLocaleTimeString()})
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    <textarea
+                                        className="comment-input"
+                                        placeholder="Optional approval comment (same for all PRs)..."
+                                        value={approvalComment}
+                                        onChange={(e) => setApprovalComment(e.target.value)}
+                                    />
+
+                                    <label className="checkbox-group">
+                                        <input
+                                            type="checkbox"
+                                            checked={removeNeedsReview}
+                                            onChange={(e) => setRemoveNeedsReview(e.target.checked)}
+                                        />
+                                        Remove <code style={{ background: 'var(--orange-bg)', padding: '2px 6px', borderRadius: 4, color: 'var(--orange)' }}>needs-review</code> label after approval
+                                    </label>
+                                </>
+                            )}
+                        </div>
+                        <div className="modal-footer">
+                            {!approving && (
+                                <>
+                                    <button className="btn" onClick={() => setShowModal(false)}>
+                                        Cancel
+                                    </button>
+                                    <button 
+                                        className="btn primary" 
+                                        onClick={approveSelected}
+                                        disabled={!isAuthConfigured() || appTokenLoading}
+                                        title={!isAuthConfigured() ? 'Enter authentication credentials to approve' : ''}
+                                    >
+                                        {appTokenLoading ? '⏳ Authenticating...' : `✅ Approve ${selectedPRs.size} PRs`}
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Toast */}
+            {toast && (
+                <div className={`toast ${toast.type}`}>
+                    {toast.type === 'success' ? '✅' : '❌'} {toast.message}
+                </div>
+            )}
+        </div>
+    );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
