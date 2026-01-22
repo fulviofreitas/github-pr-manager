@@ -1488,7 +1488,11 @@ function App() {
 
         setSelectedPRs(new Set());
         setApproving(false);
-        setShowModal(false);
+        
+        // Keep modal visible for 2.5 seconds so user can see results, then auto-close
+        setTimeout(() => {
+            setShowModal(false);
+        }, 2500);
     };
 
     const filteredPRs = getFilteredPRs();
@@ -1698,7 +1702,7 @@ function App() {
                                 </button>
                                 <button
                                     className="btn primary"
-                                    onClick={() => setShowModal(true)}
+                                    onClick={() => { setApprovalProgress({ current: 0, total: 0, results: [] }); setShowModal(true); }}
                                     disabled={selectedPRs.size === 0}
                                 >
                                     ✅ Approve Selected ({selectedPRs.size})
@@ -2135,7 +2139,7 @@ function App() {
                             )}
                         </div>
                         <div className="modal-footer">
-                            {!approving && (
+                            {!approving && approvalProgress.results.length === 0 && (
                                 <>
                                     <button className="btn" onClick={() => setShowModal(false)}>
                                         Cancel
@@ -2149,6 +2153,16 @@ function App() {
                                         {appTokenLoading ? '⏳ Authenticating...' : `✅ Approve ${selectedPRs.size} PRs`}
                                     </button>
                                 </>
+                            )}
+                            {!approving && approvalProgress.results.length > 0 && (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--t3)' }}>
+                                        Closing automatically...
+                                    </span>
+                                    <button className="btn primary" onClick={() => setShowModal(false)}>
+                                        Close Now
+                                    </button>
+                                </div>
                             )}
                         </div>
                     </div>
