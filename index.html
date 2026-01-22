@@ -903,7 +903,14 @@ const GitHubAPI = {
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             console.error(`[GitHub API] Error:`, error);
-            throw new Error(error.message || `GitHub API error: ${response.status}`);
+            // Include detailed error info if available
+            let errorMsg = error.message || `GitHub API error: ${response.status}`;
+            if (error.errors && error.errors.length > 0) {
+                const details = error.errors.map(e => e.message || e.code || JSON.stringify(e)).join(', ');
+                errorMsg += ` (${details})`;
+                console.error(`[GitHub API] Error details:`, error.errors);
+            }
+            throw new Error(errorMsg);
         }
         
         if (response.status === 204) return null;
@@ -920,13 +927,22 @@ const GitHubAPI = {
         return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, null);
     },
     
-    async approvePR(owner, repo, prNumber, token, comment = '') {
+    async approvePR(owner, repo, prNumber, token, comment = '', commitSha = null) {
+        const body = {
+            event: 'APPROVE',
+            body: comment || 'Approved via PR Approver tool ✅',
+        };
+        
+        // Include commit_id if provided (required by some GitHub configurations)
+        if (commitSha) {
+            body.commit_id = commitSha;
+        }
+        
+        console.log(`[GitHub API] Approving PR #${prNumber} with body:`, body);
+        
         return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, token, {
             method: 'POST',
-            body: JSON.stringify({
-                event: 'APPROVE',
-                body: comment || 'Approved via PR Approver tool ✅',
-            }),
+            body: JSON.stringify(body),
         });
     },
     
@@ -960,15 +976,23 @@ const GitHubAPI = {
         const header = { alg: 'RS256', typ: 'JWT' };
         
         console.log('[GitHub App] Generating JWT for App ID:', appId);
+        console.log('[GitHub App] Key format detected:', 
+            privateKey.includes('BEGIN RSA PRIVATE KEY') ? 'PKCS#1 (RSA)' :
+            privateKey.includes('BEGIN PRIVATE KEY') ? 'PKCS#8' :
+            privateKey.includes('BEGIN EC PRIVATE KEY') ? 'EC' : 'Unknown'
+        );
         
         try {
             // Use jsrsasign to sign the JWT
+            // jsrsasign accepts PEM strings directly
             const jwt = KJUR.jws.JWS.sign('RS256', JSON.stringify(header), JSON.stringify(payload), privateKey);
-            console.log('[GitHub App] JWT generated successfully');
+            console.log('[GitHub App] JWT generated successfully, length:', jwt.length);
+            console.log('[GitHub App] JWT preview:', jwt.substring(0, 50) + '...');
             return jwt;
         } catch (e) {
             console.error('[GitHub App] JWT generation failed:', e);
-            throw new Error(`Failed to generate JWT: ${e.message}. Make sure the private key is in valid PEM format.`);
+            console.error('[GitHub App] Key starts with:', privateKey.substring(0, 100));
+            throw new Error(`Failed to generate JWT: ${e.message}. Make sure the private key is in valid PEM format (PKCS#1 RSA or PKCS#8).`);
         }
     },
     
@@ -1044,9 +1068,29 @@ const GitHubAPI = {
     },
     
     async authenticateAsApp(appId, privateKey, owner, repo) {
-        const jwt = this.generateJWT(appId, privateKey);
+        // Normalize the private key - handle different line endings and formats
+        let normalizedKey = privateKey.trim();
+        
+        // If the key doesn't have proper line breaks, try to fix it
+        if (!normalizedKey.includes('\n') && normalizedKey.includes('-----BEGIN')) {
+            // Key might be on a single line or have escaped newlines
+            normalizedKey = normalizedKey
+                .replace(/\\n/g, '\n')
+                .replace(/-----BEGIN (RSA |EC )?PRIVATE KEY-----/g, '-----BEGIN $1PRIVATE KEY-----\n')
+                .replace(/-----END (RSA |EC )?PRIVATE KEY-----/g, '\n-----END $1PRIVATE KEY-----');
+        }
+        
+        console.log('[GitHub App] Normalized key starts with:', normalizedKey.substring(0, 50));
+        
+        const jwt = this.generateJWT(appId, normalizedKey);
+        console.log('[GitHub App] JWT generated, length:', jwt.length);
+        
         const installation = await this.getInstallationForRepo(jwt, owner, repo);
+        console.log('[GitHub App] Found installation:', installation.id, 'for account:', installation.account?.login);
+        
         const tokenData = await this.getInstallationToken(jwt, installation.id);
+        console.log('[GitHub App] Got installation token, expires:', tokenData.expires_at);
+        
         return {
             token: tokenData.token,
             expiresAt: tokenData.expires_at,
@@ -1128,10 +1172,18 @@ function App() {
         setAppError(null);
         
         try {
+            console.log('[GitHub App] Starting authentication...');
+            console.log('[GitHub App] App ID:', appId);
+            console.log('[GitHub App] Private Key length:', privateKey.length);
+            console.log('[GitHub App] Repo:', repo.owner + '/' + repo.repo);
+            
             const result = await GitHubAPI.authenticateAsApp(appId, privateKey, repo.owner, repo.repo);
+            console.log('[GitHub App] Authentication successful!');
+            console.log('[GitHub App] Token expires at:', result.expiresAt);
             setAppToken(result);
             return result.token;
         } catch (e) {
+            console.error('[GitHub App] Authentication failed:', e);
             setAppError(e.message);
             setAppToken(null);
             return null;
@@ -1327,16 +1379,37 @@ function App() {
             const pr = prs.find(p => p.number === prNumber);
             
             try {
-                // Approve the PR
-                await GitHubAPI.approvePR(repo.owner, repo.repo, prNumber, authToken, approvalComment);
+                console.log(`[Approve] Approving PR #${prNumber}...`);
+                // Get the commit SHA from the PR (required for approval)
+                const commitSha = pr?.head?.sha;
+                console.log(`[Approve] PR #${prNumber} HEAD SHA: ${commitSha}`);
                 
-                // Remove needs-review label if requested
+                // Approve the PR
+                await GitHubAPI.approvePR(repo.owner, repo.repo, prNumber, authToken, approvalComment, commitSha);
+                console.log(`[Approve] PR #${prNumber} approved successfully`);
+                
+                // Remove needs-review label if requested (don't fail if label doesn't exist)
+                let labelRemoved = false;
                 if (removeNeedsReview) {
-                    await GitHubAPI.removeLabel(repo.owner, repo.repo, prNumber, 'needs-review', authToken);
+                    try {
+                        console.log(`[Approve] Removing needs-review label from PR #${prNumber}...`);
+                        await GitHubAPI.removeLabel(repo.owner, repo.repo, prNumber, 'needs-review', authToken);
+                        labelRemoved = true;
+                        console.log(`[Approve] Label removed from PR #${prNumber}`);
+                    } catch (labelError) {
+                        // Label removal is optional - don't fail the whole operation
+                        console.warn(`[Approve] Could not remove label from PR #${prNumber}:`, labelError.message);
+                    }
                 }
                 
-                results.push({ prNumber, title: pr?.title, success: true });
+                results.push({ 
+                    prNumber, 
+                    title: pr?.title, 
+                    success: true,
+                    labelRemoved: removeNeedsReview ? labelRemoved : null
+                });
             } catch (e) {
+                console.error(`[Approve] Failed to approve PR #${prNumber}:`, e);
                 results.push({ prNumber, title: pr?.title, success: false, error: e.message });
             }
 
@@ -1673,7 +1746,7 @@ function App() {
                                             <div key={i} className="approval-item" style={{ 
                                                 flexDirection: 'column', 
                                                 alignItems: 'flex-start',
-                                                background: r.success ? 'var(--bg2)' : 'var(--red-bg)'
+                                                background: r.success ? 'var(--green-bg)' : 'var(--red-bg)'
                                             }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
                                                     <span className="approval-item-status">
@@ -1683,6 +1756,16 @@ function App() {
                                                         #{r.prNumber} {r.title}
                                                     </span>
                                                 </div>
+                                                {r.success && r.labelRemoved === false && (
+                                                    <div style={{ 
+                                                        fontSize: 10, 
+                                                        color: 'var(--orange)', 
+                                                        marginTop: 6,
+                                                        marginLeft: 24
+                                                    }}>
+                                                        ⚠️ Label not removed (didn't exist)
+                                                    </div>
+                                                )}
                                                 {r.error && (
                                                     <div style={{ 
                                                         fontSize: 10, 
@@ -1827,12 +1910,26 @@ function App() {
                                                 >
                                                     {appTokenLoading ? '⏳ Testing...' : '🔄 Test Connection'}
                                                 </button>
-                                                <span style={{ fontSize: 10, color: 'var(--t3)' }}>
-                                                    The app must be installed on the repository. 
-                                                    <a href="https://docs.github.com/en/apps/creating-github-apps" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--acc)', marginLeft: 4 }}>
-                                                        Learn more →
+                                            </div>
+                                            <div style={{ 
+                                                fontSize: 10, 
+                                                color: 'var(--t3)', 
+                                                marginTop: 10,
+                                                padding: '10px 12px',
+                                                background: 'var(--bg0)',
+                                                borderRadius: 6,
+                                                lineHeight: 1.6
+                                            }}>
+                                                <strong style={{ color: 'var(--t1)' }}>Required GitHub App permissions:</strong>
+                                                <ul style={{ margin: '6px 0 0 16px', padding: 0 }}>
+                                                    <li><code style={{ background: 'var(--bg3)', padding: '1px 4px', borderRadius: 3 }}>Pull requests: Write</code> — to approve PRs</li>
+                                                    <li><code style={{ background: 'var(--bg3)', padding: '1px 4px', borderRadius: 3 }}>Issues: Write</code> — to remove labels</li>
+                                                </ul>
+                                                <div style={{ marginTop: 6 }}>
+                                                    <a href="https://docs.github.com/en/apps/creating-github-apps" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--acc)' }}>
+                                                        Creating a GitHub App →
                                                     </a>
-                                                </span>
+                                                </div>
                                             </div>
                                             
                                             {appError && (
