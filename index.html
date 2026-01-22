@@ -930,8 +930,12 @@ const GitHubAPI = {
     async approvePR(owner, repo, prNumber, token, comment = '', commitSha = null) {
         const body = {
             event: 'APPROVE',
-            body: comment || 'Approved via PR Approver tool ✅',
         };
+        
+        // Only include body if there's a comment
+        if (comment && comment.trim()) {
+            body.body = comment.trim();
+        }
         
         // Include commit_id if provided (required by some GitHub configurations)
         if (commitSha) {
@@ -1102,16 +1106,17 @@ const GitHubAPI = {
 function App() {
     const [repoInput, setRepoInput] = useState('');
     const [token, setToken] = useState(() => localStorage.getItem('gh_token') || '');
-    const [repo, setRepo] = useState(null);
-    const [prs, setPRs] = useState([]);
-    const [selectedPRs, setSelectedPRs] = useState(new Set());
+    const [repos, setRepos] = useState([]); // Array of { owner, repo } objects
+    const [allPRs, setAllPRs] = useState([]); // All PRs with repo info attached
+    const [selectedPRs, setSelectedPRs] = useState(new Set()); // Set of "owner/repo#number" strings
+    const [compactView, setCompactView] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [toast, setToast] = useState(null);
     const [showModal, setShowModal] = useState(false);
     const [approving, setApproving] = useState(false);
     const [approvalProgress, setApprovalProgress] = useState({ current: 0, total: 0, results: [] });
-    const [approvalComment, setApprovalComment] = useState('');
+    const [approvalComment, setApprovalComment] = useState('Approved via PR Approver tool ✅');
     const [removeNeedsReview, setRemoveNeedsReview] = useState(true);
     const [filterNeedsReview, setFilterNeedsReview] = useState(false);
     const [filterMissingApproval, setFilterMissingApproval] = useState(true);
@@ -1163,7 +1168,7 @@ function App() {
     
     // Get GitHub App installation token when needed
     const getAppToken = async () => {
-        if (!appId || !privateKey || !repo) {
+        if (!appId || !privateKey || repos.length === 0) {
             setAppError('App ID, Private Key, and repository are required');
             return null;
         }
@@ -1172,12 +1177,14 @@ function App() {
         setAppError(null);
         
         try {
+            // Use the first repo to authenticate (app should have access to all)
+            const firstRepo = repos[0];
             console.log('[GitHub App] Starting authentication...');
             console.log('[GitHub App] App ID:', appId);
             console.log('[GitHub App] Private Key length:', privateKey.length);
-            console.log('[GitHub App] Repo:', repo.owner + '/' + repo.repo);
+            console.log('[GitHub App] Repo:', firstRepo.owner + '/' + firstRepo.repo);
             
-            const result = await GitHubAPI.authenticateAsApp(appId, privateKey, repo.owner, repo.repo);
+            const result = await GitHubAPI.authenticateAsApp(appId, privateKey, firstRepo.owner, firstRepo.repo);
             console.log('[GitHub App] Authentication successful!');
             console.log('[GitHub App] Token expires at:', result.expiresAt);
             setAppToken(result);
@@ -1216,7 +1223,7 @@ function App() {
     };
 
     // Fetch reviews for all PRs
-    const fetchReviews = async (owner, repo, pullRequests) => {
+    const fetchReviews = async (pullRequests) => {
         setLoadingReviews(true);
         const reviews = {};
         
@@ -1227,7 +1234,7 @@ function App() {
             const results = await Promise.all(
                 batch.map(async (pr) => {
                     try {
-                        const prReviews = await GitHubAPI.getPullRequestReviews(owner, repo, pr.number);
+                        const prReviews = await GitHubAPI.getPullRequestReviews(pr._repo.owner, pr._repo.repo, pr.number);
                         // Get the latest review state per user
                         const reviewerStates = {};
                         prReviews.forEach(review => {
@@ -1248,21 +1255,21 @@ function App() {
                             .some(r => r.state === 'CHANGES_REQUESTED');
                         
                         return {
-                            prNumber: pr.number,
+                            prKey: pr._key,
                             approved: approvers.length > 0,
                             approvers,
                             hasChangesRequested,
                             reviewCount: Object.keys(reviewerStates).length
                         };
                     } catch (e) {
-                        console.error(`Failed to fetch reviews for PR #${pr.number}:`, e);
-                        return { prNumber: pr.number, approved: false, approvers: [], hasChangesRequested: false, reviewCount: 0 };
+                        console.error(`Failed to fetch reviews for PR ${pr._key}:`, e);
+                        return { prKey: pr._key, approved: false, approvers: [], hasChangesRequested: false, reviewCount: 0 };
                     }
                 })
             );
             
             results.forEach(r => {
-                reviews[r.prNumber] = r;
+                reviews[r.prKey] = r;
             });
         }
         
@@ -1271,52 +1278,84 @@ function App() {
         return reviews;
     };
 
-    // Fetch PRs
+    // Parse multiple repo inputs (comma, newline, or space separated)
+    const parseMultipleRepos = (input) => {
+        const lines = input.split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
+        const parsed = [];
+        for (const line of lines) {
+            const repo = GitHubAPI.parseRepoInput(line);
+            if (repo) {
+                parsed.push(repo);
+            }
+        }
+        return parsed;
+    };
+
+    // Fetch PRs from multiple repos
     const fetchPRs = async () => {
         if (!repoInput.trim()) {
-            setError('Please enter a repository');
+            setError('Please enter at least one repository');
             return;
         }
 
-        const parsed = GitHubAPI.parseRepoInput(repoInput);
-        if (!parsed) {
-            setError('Invalid repository format. Use: owner/repo or GitHub URL');
+        const parsedRepos = parseMultipleRepos(repoInput);
+        if (parsedRepos.length === 0) {
+            setError('Invalid repository format. Use: owner/repo or GitHub URL (one per line or comma-separated)');
             return;
         }
 
         setLoading(true);
         setError(null);
-        setRepo(parsed);
-        setPRs([]);
+        setRepos(parsedRepos);
+        setAllPRs([]);
         setSelectedPRs(new Set());
         setPrReviews({});
 
         try {
-            // Fetch PRs without authentication (public endpoint)
-            const pullRequests = await GitHubAPI.getPullRequests(parsed.owner, parsed.repo);
-            setPRs(pullRequests);
+            // Fetch PRs from all repos in parallel
+            const allPullRequests = [];
+            const results = await Promise.all(
+                parsedRepos.map(async (repoInfo) => {
+                    try {
+                        const prs = await GitHubAPI.getPullRequests(repoInfo.owner, repoInfo.repo);
+                        // Attach repo info to each PR
+                        return prs.map(pr => ({
+                            ...pr,
+                            _repo: repoInfo,
+                            _key: `${repoInfo.owner}/${repoInfo.repo}#${pr.number}`
+                        }));
+                    } catch (e) {
+                        console.error(`Failed to fetch PRs from ${repoInfo.owner}/${repoInfo.repo}:`, e);
+                        return [];
+                    }
+                })
+            );
             
-            if (pullRequests.length === 0) {
+            results.forEach(prs => allPullRequests.push(...prs));
+            setAllPRs(allPullRequests);
+            
+            if (allPullRequests.length === 0) {
                 showToast('No open pull requests found', 'success');
             } else {
+                showToast(`Found ${allPullRequests.length} PRs from ${parsedRepos.length} repo(s)`, 'success');
                 // Fetch reviews for all PRs
-                await fetchReviews(parsed.owner, parsed.repo, pullRequests);
+                await fetchReviews(allPullRequests);
             }
         } catch (e) {
             setError(e.message);
-            setRepo(null);
+            setRepos([]);
         } finally {
             setLoading(false);
         }
     };
 
     // Toggle PR selection
-    const togglePR = (prNumber) => {
+    const togglePR = (prKey) => {
         const newSelected = new Set(selectedPRs);
-        if (newSelected.has(prNumber)) {
-            newSelected.delete(prNumber);
+        if (newSelected.has(prKey)) {
+            newSelected.delete(prKey);
         } else {
-            newSelected.add(prNumber);
+            newSelected.add(prKey);
         }
         setSelectedPRs(newSelected);
     };
@@ -1324,20 +1363,20 @@ function App() {
     // Select all / none
     const selectAll = () => {
         const filtered = getFilteredPRs();
-        if (selectedPRs.size === filtered.length) {
+        if (selectedPRs.size === filtered.length && filtered.length > 0) {
             setSelectedPRs(new Set());
         } else {
-            setSelectedPRs(new Set(filtered.map(pr => pr.number)));
+            setSelectedPRs(new Set(filtered.map(pr => pr._key)));
         }
     };
 
     // Get filtered PRs
     const getFilteredPRs = () => {
-        let filtered = prs;
+        let filtered = allPRs;
         
         if (filterMissingApproval) {
             filtered = filtered.filter(pr => {
-                const review = prReviews[pr.number];
+                const review = prReviews[pr._key];
                 return !review || !review.approved;
             });
         }
@@ -1352,10 +1391,15 @@ function App() {
     };
     
     // Count PRs missing approval
-    const missingApprovalCount = prs.filter(pr => {
-        const review = prReviews[pr.number];
+    const missingApprovalCount = allPRs.filter(pr => {
+        const review = prReviews[pr._key];
         return !review || !review.approved;
     }).length;
+    
+    // Count PRs with needs-review label
+    const needsReviewCount = allPRs.filter(pr => 
+        pr.labels.some(l => l.name.toLowerCase() === 'needs-review')
+    ).length;
 
     // Approve selected PRs
     const approveSelected = async () => {
@@ -1371,62 +1415,74 @@ function App() {
         setApproving(true);
         setApprovalProgress({ current: 0, total: selectedPRs.size, results: [] });
 
-        const prNumbers = Array.from(selectedPRs);
+        const prKeys = Array.from(selectedPRs);
         const results = [];
 
-        for (let i = 0; i < prNumbers.length; i++) {
-            const prNumber = prNumbers[i];
-            const pr = prs.find(p => p.number === prNumber);
+        for (let i = 0; i < prKeys.length; i++) {
+            const prKey = prKeys[i];
+            const pr = allPRs.find(p => p._key === prKey);
+            
+            if (!pr) {
+                results.push({ prKey, title: 'Unknown', success: false, error: 'PR not found' });
+                continue;
+            }
             
             try {
-                console.log(`[Approve] Approving PR #${prNumber}...`);
+                console.log(`[Approve] Approving ${prKey}...`);
                 // Get the commit SHA from the PR (required for approval)
                 const commitSha = pr?.head?.sha;
-                console.log(`[Approve] PR #${prNumber} HEAD SHA: ${commitSha}`);
+                console.log(`[Approve] ${prKey} HEAD SHA: ${commitSha}`);
+                
+                // Use the comment or empty string if cleared
+                const comment = approvalComment.trim();
                 
                 // Approve the PR
-                await GitHubAPI.approvePR(repo.owner, repo.repo, prNumber, authToken, approvalComment, commitSha);
-                console.log(`[Approve] PR #${prNumber} approved successfully`);
+                await GitHubAPI.approvePR(pr._repo.owner, pr._repo.repo, pr.number, authToken, comment, commitSha);
+                console.log(`[Approve] ${prKey} approved successfully`);
                 
                 // Remove needs-review label if requested (don't fail if label doesn't exist)
                 let labelRemoved = false;
                 if (removeNeedsReview) {
                     try {
-                        console.log(`[Approve] Removing needs-review label from PR #${prNumber}...`);
-                        await GitHubAPI.removeLabel(repo.owner, repo.repo, prNumber, 'needs-review', authToken);
+                        console.log(`[Approve] Removing needs-review label from ${prKey}...`);
+                        await GitHubAPI.removeLabel(pr._repo.owner, pr._repo.repo, pr.number, 'needs-review', authToken);
                         labelRemoved = true;
-                        console.log(`[Approve] Label removed from PR #${prNumber}`);
+                        console.log(`[Approve] Label removed from ${prKey}`);
                     } catch (labelError) {
                         // Label removal is optional - don't fail the whole operation
-                        console.warn(`[Approve] Could not remove label from PR #${prNumber}:`, labelError.message);
+                        console.warn(`[Approve] Could not remove label from ${prKey}:`, labelError.message);
                     }
                 }
                 
                 results.push({ 
-                    prNumber, 
+                    prKey,
+                    prNumber: pr.number,
+                    repo: `${pr._repo.owner}/${pr._repo.repo}`,
                     title: pr?.title, 
                     success: true,
                     labelRemoved: removeNeedsReview ? labelRemoved : null
                 });
             } catch (e) {
-                console.error(`[Approve] Failed to approve PR #${prNumber}:`, e);
-                results.push({ prNumber, title: pr?.title, success: false, error: e.message });
+                console.error(`[Approve] Failed to approve ${prKey}:`, e);
+                results.push({ 
+                    prKey, 
+                    prNumber: pr.number,
+                    repo: `${pr._repo.owner}/${pr._repo.repo}`,
+                    title: pr?.title, 
+                    success: false, 
+                    error: e.message 
+                });
             }
 
-            setApprovalProgress({ current: i + 1, total: prNumbers.length, results });
+            setApprovalProgress({ current: i + 1, total: prKeys.length, results });
         }
 
         const successCount = results.filter(r => r.success).length;
         showToast(`Approved ${successCount} of ${results.length} PRs`, successCount === results.length ? 'success' : 'error');
         
-        // Refresh PRs
-        if (repo) {
-            try {
-                const pullRequests = await GitHubAPI.getPullRequests(repo.owner, repo.repo);
-                setPRs(pullRequests);
-            } catch (e) {
-                console.error('Failed to refresh PRs:', e);
-            }
+        // Refresh PRs from all repos
+        if (repos.length > 0) {
+            fetchPRs();
         }
 
         setSelectedPRs(new Set());
@@ -1435,9 +1491,6 @@ function App() {
     };
 
     const filteredPRs = getFilteredPRs();
-    const needsReviewCount = prs.filter(pr => 
-        pr.labels.some(l => l.name.toLowerCase() === 'needs-review')
-    ).length;
 
     return (
         <div className="app">
@@ -1451,14 +1504,20 @@ function App() {
 
                 <div className="input-section">
                     <div className="input-group">
-                        <label className="input-label">Repository</label>
-                        <input
-                            type="text"
+                        <label className="input-label">Repositories (one per line or comma-separated)</label>
+                        <textarea
                             className="input-field"
-                            placeholder="owner/repo or GitHub URL"
+                            style={{ minHeight: 38, maxHeight: 100, resize: 'vertical' }}
+                            placeholder="owner/repo, another/repo&#10;or paste GitHub URLs"
                             value={repoInput}
                             onChange={(e) => setRepoInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && fetchPRs()}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    fetchPRs();
+                                }
+                            }}
+                            rows={1}
                         />
                     </div>
 
@@ -1467,20 +1526,41 @@ function App() {
                     </button>
 
                     {(user || appToken) && (
-                        <div style={{ 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            gap: 8, 
-                            padding: '8px 12px',
-                            background: 'var(--green-bg)',
-                            borderRadius: 8,
-                            fontSize: 11,
-                            color: 'var(--green)'
-                        }}>
+                        <div 
+                            style={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                gap: 8, 
+                                padding: '8px 12px',
+                                background: 'var(--green-bg)',
+                                borderRadius: 8,
+                                fontSize: 11,
+                                color: 'var(--green)',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s'
+                            }}
+                            onClick={() => {
+                                if (user) {
+                                    setToken('');
+                                    setUser(null);
+                                    localStorage.removeItem('gh_token');
+                                    showToast('Signed out', 'success');
+                                }
+                                if (appToken) {
+                                    setAppToken(null);
+                                    setAppId('');
+                                    setPrivateKey('');
+                                    localStorage.removeItem('gh_app_id');
+                                    localStorage.removeItem('gh_private_key');
+                                    showToast('GitHub App disconnected', 'success');
+                                }
+                            }}
+                            title="Click to sign out"
+                        >
                             {user ? (
-                                <>✓ Signed in as <strong>{user.login}</strong></>
+                                <>✓ Signed in as <strong>{user.login}</strong> <span style={{ opacity: 0.7 }}>(click to sign out)</span></>
                             ) : (
-                                <>🤖 GitHub App authenticated</>
+                                <>🤖 GitHub App authenticated <span style={{ opacity: 0.7 }}>(click to disconnect)</span></>
                             )}
                         </div>
                     )}
@@ -1500,7 +1580,7 @@ function App() {
                     </div>
                 )}
 
-                {!repo && !loading && (
+                {repos.length === 0 && !loading && (
                     <div className="welcome">
                         <div className="welcome-icon">🚀</div>
                         <h1 className="welcome-title">Welcome to PR Approver</h1>
@@ -1548,16 +1628,20 @@ function App() {
                         color: 'var(--t2)'
                     }}>
                         <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
-                        Fetching review status for {prs.length} PRs...
+                        Fetching review status for {allPRs.length} PRs...
                     </div>
                 )}
 
-                {repo && !loading && (
+                {repos.length > 0 && !loading && (
                     <>
                         {/* Stats */}
                         <div className="stats-bar">
                             <div className="stat-card">
-                                <div className="stat-value">{prs.length}</div>
+                                <div className="stat-value">{repos.length}</div>
+                                <div className="stat-label">Repositories</div>
+                            </div>
+                            <div className="stat-card">
+                                <div className="stat-value">{allPRs.length}</div>
                                 <div className="stat-label">Open PRs</div>
                             </div>
                             <div className="stat-card needs-review">
@@ -1581,10 +1665,20 @@ function App() {
                             <h2 className="pr-title">
                                 📋 Pull Requests
                                 <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--t3)' }}>
-                                    {repo.owner}/{repo.repo}
+                                    {repos.length === 1 
+                                        ? `${repos[0].owner}/${repos[0].repo}`
+                                        : `${repos.length} repositories`
+                                    }
                                 </span>
                             </h2>
                             <div className="pr-actions">
+                                <button
+                                    className={`filter-btn ${compactView ? 'active' : ''}`}
+                                    onClick={() => setCompactView(!compactView)}
+                                    title="Toggle compact view"
+                                >
+                                    {compactView ? '📋 Expanded' : '📝 Compact'}
+                                </button>
                                 <button
                                     className={`filter-btn ${filterMissingApproval ? 'active' : ''}`}
                                     onClick={() => setFilterMissingApproval(!filterMissingApproval)}
@@ -1619,80 +1713,102 @@ function App() {
                                 <div className="empty-desc">
                                     {filterNeedsReview 
                                         ? 'No PRs with the needs-review label'
-                                        : 'This repository has no open pull requests'}
+                                        : filterMissingApproval
+                                            ? 'All PRs have been approved'
+                                            : 'No open pull requests in selected repositories'}
                                 </div>
                             </div>
                         ) : (
-                            <div className="pr-list">
+                            <div className="pr-list" style={compactView ? { gap: 4 } : {}}>
                                 {filteredPRs.map(pr => (
                                     <div
-                                        key={pr.number}
-                                        className={`pr-card ${selectedPRs.has(pr.number) ? 'selected' : ''}`}
-                                        onClick={() => togglePR(pr.number)}
+                                        key={pr._key}
+                                        className={`pr-card ${selectedPRs.has(pr._key) ? 'selected' : ''}`}
+                                        onClick={() => togglePR(pr._key)}
+                                        style={compactView ? { padding: 12 } : {}}
                                     >
-                                        <div className="pr-card-header">
+                                        <div className="pr-card-header" style={compactView ? { marginBottom: 0 } : {}}>
                                             <input
                                                 type="checkbox"
                                                 className="pr-checkbox"
-                                                checked={selectedPRs.has(pr.number)}
+                                                checked={selectedPRs.has(pr._key)}
                                                 onChange={() => {}}
                                             />
                                             <div className="pr-info">
-                                                <span className="pr-number">#{pr.number}</span>
-                                                <div className="pr-name">{pr.title}</div>
-                                                <div className="pr-meta">
-                                                    <span className="pr-author">
-                                                        <img 
-                                                            src={pr.user.avatar_url} 
-                                                            alt={pr.user.login}
-                                                            className="pr-author-avatar"
-                                                        />
-                                                        {pr.user.login}
-                                                    </span>
-                                                    <span>📅 {new Date(pr.created_at).toLocaleDateString()}</span>
-                                                    <span>💬 {pr.comments || 0}</span>
-                                                    <span>📝 +{pr.additions || 0} -{pr.deletions || 0}</span>
-                                                    {prReviews[pr.number] && (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                                    {repos.length > 1 && (
+                                                        <span style={{ 
+                                                            fontSize: 10, 
+                                                            color: 'var(--t3)',
+                                                            background: 'var(--bg3)',
+                                                            padding: '2px 6px',
+                                                            borderRadius: 4
+                                                        }}>
+                                                            {pr._repo.owner}/{pr._repo.repo}
+                                                        </span>
+                                                    )}
+                                                    <span className="pr-number">#{pr.number}</span>
+                                                    {prReviews[pr._key] && (
                                                         <span style={{
                                                             padding: '2px 8px',
                                                             borderRadius: 12,
                                                             fontSize: 10,
                                                             fontWeight: 600,
-                                                            background: prReviews[pr.number].approved 
+                                                            background: prReviews[pr._key].approved 
                                                                 ? 'var(--green-bg)' 
-                                                                : prReviews[pr.number].hasChangesRequested 
+                                                                : prReviews[pr._key].hasChangesRequested 
                                                                     ? 'var(--red-bg)'
                                                                     : 'var(--orange-bg)',
-                                                            color: prReviews[pr.number].approved 
+                                                            color: prReviews[pr._key].approved 
                                                                 ? 'var(--green)' 
-                                                                : prReviews[pr.number].hasChangesRequested 
+                                                                : prReviews[pr._key].hasChangesRequested 
                                                                     ? 'var(--red)'
                                                                     : 'var(--orange)',
                                                         }}>
-                                                            {prReviews[pr.number].approved 
-                                                                ? `✓ Approved (${prReviews[pr.number].approvers.length})`
-                                                                : prReviews[pr.number].hasChangesRequested
+                                                            {prReviews[pr._key].approved 
+                                                                ? `✓ Approved (${prReviews[pr._key].approvers.length})`
+                                                                : prReviews[pr._key].hasChangesRequested
                                                                     ? '✗ Changes requested'
                                                                     : '⏳ Awaiting review'}
                                                         </span>
                                                     )}
                                                 </div>
-                                                {pr.labels.length > 0 && (
-                                                    <div className="pr-labels">
-                                                        {pr.labels.map(label => (
-                                                            <span
-                                                                key={label.id}
-                                                                className={`label ${label.name.toLowerCase() === 'needs-review' ? 'needs-review' : ''}`}
-                                                                style={{
-                                                                    backgroundColor: `#${label.color}22`,
-                                                                    color: `#${label.color}`,
-                                                                    borderColor: `#${label.color}`,
-                                                                }}
-                                                            >
-                                                                {label.name}
+                                                <div className="pr-name" style={compactView ? { fontSize: 13, marginTop: 4 } : {}}>
+                                                    {pr.title}
+                                                </div>
+                                                {!compactView && (
+                                                    <>
+                                                        <div className="pr-meta">
+                                                            <span className="pr-author">
+                                                                <img 
+                                                                    src={pr.user.avatar_url} 
+                                                                    alt={pr.user.login}
+                                                                    className="pr-author-avatar"
+                                                                />
+                                                                {pr.user.login}
                                                             </span>
-                                                        ))}
-                                                    </div>
+                                                            <span>📅 {new Date(pr.created_at).toLocaleDateString()}</span>
+                                                            <span>💬 {pr.comments || 0}</span>
+                                                            <span>📝 +{pr.additions || 0} -{pr.deletions || 0}</span>
+                                                        </div>
+                                                        {pr.labels.length > 0 && (
+                                                            <div className="pr-labels">
+                                                                {pr.labels.map(label => (
+                                                                    <span
+                                                                        key={label.id}
+                                                                        className={`label ${label.name.toLowerCase() === 'needs-review' ? 'needs-review' : ''}`}
+                                                                        style={{
+                                                                            backgroundColor: `#${label.color}22`,
+                                                                            color: `#${label.color}`,
+                                                                            borderColor: `#${label.color}`,
+                                                                        }}
+                                                                    >
+                                                                        {label.name}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </>
                                                 )}
                                             </div>
                                             <a
@@ -1703,7 +1819,7 @@ function App() {
                                                 onClick={(e) => e.stopPropagation()}
                                                 style={{ fontSize: 11 }}
                                             >
-                                                🔗 View
+                                                🔗
                                             </a>
                                         </div>
                                     </div>
@@ -1752,8 +1868,18 @@ function App() {
                                                     <span className="approval-item-status">
                                                         {r.success ? '✅' : '❌'}
                                                     </span>
-                                                    <span className="approval-item-name">
-                                                        #{r.prNumber} {r.title}
+                                                    <span className="approval-item-name" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                        <span>
+                                                            {repos.length > 1 && r.repo && (
+                                                                <span style={{ fontSize: 9, color: 'var(--t3)', marginRight: 6 }}>
+                                                                    {r.repo}
+                                                                </span>
+                                                            )}
+                                                            #{r.prNumber}
+                                                        </span>
+                                                        <span style={{ fontSize: 11, color: r.success ? 'var(--green)' : 'var(--red)' }}>
+                                                            {r.title}
+                                                        </span>
                                                     </span>
                                                 </div>
                                                 {r.success && r.labelRemoved === false && (
@@ -1786,13 +1912,21 @@ function App() {
                             {!approving && (
                                 <>
                                     <div className="approval-list">
-                                        {Array.from(selectedPRs).map(prNumber => {
-                                            const pr = prs.find(p => p.number === prNumber);
+                                        {Array.from(selectedPRs).map(prKey => {
+                                            const pr = allPRs.find(p => p._key === prKey);
                                             return (
-                                                <div key={prNumber} className="approval-item">
+                                                <div key={prKey} className="approval-item">
                                                     <span className="approval-item-status">📋</span>
-                                                    <span className="approval-item-name">
-                                                        #{prNumber} {pr?.title}
+                                                    <span className="approval-item-name" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                        <span>
+                                                            {repos.length > 1 && (
+                                                                <span style={{ fontSize: 9, color: 'var(--t3)', marginRight: 6 }}>
+                                                                    {pr?._repo?.owner}/{pr?._repo?.repo}
+                                                                </span>
+                                                            )}
+                                                            #{pr?.number}
+                                                        </span>
+                                                        <span style={{ fontSize: 11, color: 'var(--t1)' }}>{pr?.title}</span>
                                                     </span>
                                                 </div>
                                             );
@@ -1905,7 +2039,7 @@ function App() {
                                                 <button 
                                                     className="btn"
                                                     onClick={getAppToken}
-                                                    disabled={!appId || !privateKey || !repo || appTokenLoading}
+                                                    disabled={!appId || !privateKey || repos.length === 0 || appTokenLoading}
                                                     style={{ fontSize: 11 }}
                                                 >
                                                     {appTokenLoading ? '⏳ Testing...' : '🔄 Test Connection'}
@@ -1963,12 +2097,30 @@ function App() {
                                         </div>
                                     )}
 
-                                    <textarea
-                                        className="comment-input"
-                                        placeholder="Optional approval comment (same for all PRs)..."
-                                        value={approvalComment}
-                                        onChange={(e) => setApprovalComment(e.target.value)}
-                                    />
+                                    <div style={{ marginTop: 16 }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                            <label className="input-label">Approval Comment (optional)</label>
+                                            {approvalComment && (
+                                                <button 
+                                                    className="btn" 
+                                                    style={{ fontSize: 10, padding: '4px 8px' }}
+                                                    onClick={() => setApprovalComment('')}
+                                                >
+                                                    Clear
+                                                </button>
+                                            )}
+                                        </div>
+                                        <textarea
+                                            className="comment-input"
+                                            style={{ marginTop: 0 }}
+                                            placeholder="Leave empty for no comment..."
+                                            value={approvalComment}
+                                            onChange={(e) => setApprovalComment(e.target.value)}
+                                        />
+                                        <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 4 }}>
+                                            This comment will be added to all approved PRs. Clear to approve without a comment.
+                                        </div>
+                                    </div>
 
                                     <label className="checkbox-group">
                                         <input
