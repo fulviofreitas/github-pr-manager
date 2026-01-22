@@ -1,0 +1,473 @@
+---
+description: GitHub Workflows and Actions development guidelines
+globs: ".github/workflows/**/*.yml, .github/workflows/**/*.yaml, .github/actions/**/*.yml, .github/actions/**/*.yaml"
+alwaysApply: false
+---
+
+# GitHub Workflows & Actions Development Guidelines
+
+## 🎯 Core Principles
+
+1. **GitHub Actions Focus**: All code specific to GitHub Workflows, Actions, and platform features
+2. **SRE Mindset**: Reliability, scalability, observability, security, cost optimization
+3. **Idempotency**: Consistent results when run multiple times with same inputs
+4. **Modularity**: Reusable workflows, composite actions, clear separation of concerns
+
+## 📁 Workflow Structure
+
+```
+.github/
+├── workflows/
+│   ├── ci.yml              # Main CI pipeline (lint, test, security)
+│   ├── release.yml         # Release automation (triggered by CI)
+│   ├── docker-publish.yml  # Docker build (triggered by Release tags)
+│   └── reusable-*.yml      # Reusable workflow templates
+├── actions/
+│   └── custom-action/      # Composite or JavaScript actions
+│       ├── action.yml
+│       └── src/
+└── CODEOWNERS              # Review requirements
+```
+
+## 🔗 Workflow Chaining Pattern
+
+This project uses chained workflows for proper CI/CD:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    🧪 CI Pipeline                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────┐  │
+│  │📝 Commit │  │🐍 Backend│  │⚛️ Frontend│  │🔐 Security  │  │
+│  │   Lint   │  │  Tests   │  │  Tests   │  │   Scan     │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └─────┬───────┘  │
+│       └─────────────┴────────────┴───────────────┘          │
+│                           ▼                                 │
+│                    ✅ CI Success                            │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ workflow_run (on success)
+                           ▼
+              ┌────────────────────────┐
+              │     🚀 Release         │
+              └───────────┬────────────┘
+                          │ push tag (v*)
+                          ▼
+              ┌────────────────────────┐
+              │  🐳 Docker Build       │
+              └────────────────────────┘
+```
+
+### Chain Implementation
+
+```yaml
+# release.yml - Triggers after CI
+on:
+  workflow_run:
+    workflows: ["🧪 CI Pipeline"]
+    types: [completed]
+    branches: [main, master]
+
+# docker-publish.yml - Triggers on version tags
+on:
+  push:
+    tags:
+      - 'v*'
+```
+
+## 📝 Naming Conventions
+
+| Element | Pattern | Example |
+|---------|---------|---------|
+| Workflow files | kebab-case | `ci-build.yml` |
+| Job IDs | kebab-case | `build-and-test` |
+| Step IDs | kebab-case | `setup-python` |
+| Secrets | SCREAMING_SNAKE | `AWS_ACCESS_KEY_ID` |
+| Environment vars | SCREAMING_SNAKE | `NODE_ENV` |
+
+## 🔐 Security Best Practices
+
+### Permissions (Least Privilege)
+
+```yaml
+# ✅ Good: Explicit, minimal permissions
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+# ❌ Bad: Default write-all permissions
+permissions: write-all
+```
+
+### Secrets Management
+
+```yaml
+# ✅ Good: Use secrets context, never expose
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: ./deploy.sh
+        
+# ❌ Bad: Echo secrets (even masked, avoid)
+      - run: echo "${{ secrets.API_TOKEN }}"
+```
+
+### Action Pinning
+
+```yaml
+# ✅ Good: Pin to full SHA for security
+- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+# ⚠️ Acceptable: Pin to major version (balance of security/maintenance)
+- uses: actions/checkout@v4
+
+# ❌ Bad: Unpinned or branch reference
+- uses: actions/checkout@main
+```
+
+### Pull Request Security
+
+```yaml
+# ⚠️ Dangerous: pull_request_target has write permissions
+# Only use when absolutely necessary, never checkout PR code
+on:
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  safe-job:
+    if: github.event.label.name == 'safe-to-test'
+    runs-on: ubuntu-latest
+    steps:
+      # ✅ Safe: checkout base, not PR head
+      - uses: actions/checkout@v4
+      
+      # ❌ NEVER: checkout PR code with write permissions
+      # - uses: actions/checkout@v4
+      #   with:
+      #     ref: ${{ github.event.pull_request.head.sha }}
+```
+
+## 📊 Workflow Patterns
+
+### Job Dependencies & Parallelization
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+
+  # Runs after lint and test complete
+  deploy:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - run: ./deploy.sh
+```
+
+### Matrix Strategies
+
+```yaml
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false  # Continue other jobs if one fails
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.11', '3.12']
+        exclude:
+          - os: macos-latest
+            python-version: '3.11'
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+```
+
+### Caching Dependencies
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'  # Built-in caching
+          
+      # Or manual cache control
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+```
+
+### Reusable Workflows
+
+```yaml
+# .github/workflows/reusable-build.yml
+name: Reusable Build
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.12'
+        type: string
+    secrets:
+      deploy-token:
+        description: 'Deployment token'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+```
+
+```yaml
+# .github/workflows/ci.yml - Calling the reusable workflow
+jobs:
+  call-build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      python-version: '3.12'
+    secrets:
+      deploy-token: ${{ secrets.DEPLOY_TOKEN }}
+```
+
+## 🔄 Reliability Patterns
+
+### Retry Mechanism
+
+```yaml
+jobs:
+  flaky-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: npm test
+```
+
+### Conditional Execution
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to staging
+        if: github.ref == 'refs/heads/develop'
+        run: ./deploy-staging.sh
+        
+      - name: Deploy to production
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: ./deploy-prod.sh
+```
+
+### Timeout Configuration
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Job-level timeout
+    steps:
+      - name: Long running task
+        timeout-minutes: 10  # Step-level timeout
+        run: ./long-task.sh
+```
+
+### Continue on Error
+
+```yaml
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Non-critical step
+        continue-on-error: true
+        run: ./optional-check.sh
+        
+      - name: Check previous step
+        if: steps.previous.outcome == 'failure'
+        run: echo "Previous step failed, but continuing"
+```
+
+## 📈 Observability
+
+### Job Summaries
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Build Results 🏗️" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests Passed | 42 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Coverage | 85% |" >> $GITHUB_STEP_SUMMARY
+```
+
+### Annotations
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create annotation
+        run: |
+          echo "::warning file=src/main.py,line=10::Consider refactoring this function"
+          echo "::error file=src/config.py,line=5::Missing required configuration"
+```
+
+### Artifact Upload
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests
+        run: pytest --junitxml=test-results.xml
+        
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()  # Upload even on failure
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 30
+```
+
+## 💰 Cost Optimization
+
+### Concurrency Control
+
+```yaml
+# Cancel in-progress runs for same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+### Path Filtering
+
+```yaml
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/ci.yml'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+```
+
+### Skip CI
+
+```yaml
+# Workflows auto-skip for commits with these messages:
+# [skip ci], [ci skip], [no ci], [skip actions], [actions skip]
+
+# Or explicitly in workflow
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+```
+
+## 🛡️ Input Validation
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      version:
+        description: 'Version to deploy (semver)'
+        required: true
+        type: string
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format. Expected: v1.2.3"
+            exit 1
+          fi
+```
+
+## ⚠️ Anti-Patterns to Avoid
+
+| Anti-Pattern | Why It's Bad | Fix |
+|--------------|--------------|-----|
+| `permissions: write-all` | Excessive permissions | Specify minimal required permissions |
+| Unpinned actions | Supply chain risk | Pin to SHA or major version |
+| Secrets in logs | Credential exposure | Never echo secrets |
+| No timeout | Stuck jobs waste resources | Set job/step timeouts |
+| `pull_request_target` + checkout PR | Code injection risk | Only checkout base branch |
+| Hardcoded values | Inflexible, error-prone | Use inputs, env vars, or matrix |
+| No caching | Slow, expensive builds | Cache dependencies |
+| No concurrency control | Wasted compute on old runs | Use `concurrency` to cancel |
+
+## 📋 Workflow Review Checklist
+
+Before merging workflow changes:
+
+- [ ] Permissions follow least privilege
+- [ ] Actions pinned to SHA or major version
+- [ ] Secrets never exposed in logs
+- [ ] Timeouts configured for jobs/steps
+- [ ] Caching enabled for dependencies
+- [ ] Concurrency configured to cancel stale runs
+- [ ] Path filters exclude irrelevant changes
+- [ ] Job summaries provide useful feedback
+- [ ] `pull_request_target` used safely (if at all)
+- [ ] Input validation for `workflow_dispatch`
