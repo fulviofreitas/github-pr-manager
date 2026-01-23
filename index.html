@@ -415,6 +415,8 @@ body {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
+    margin-left: auto;
+    justify-content: flex-end;
 }
 
 .filter-btn {
@@ -934,14 +936,14 @@ const GitHubAPI = {
         return response.json();
     },
     
-    async getPullRequests(owner, repo, state = 'open') {
-        // Public endpoint - no token required
-        return this.request(`/repos/${owner}/${repo}/pulls?state=${state}&per_page=100`, null);
+    async getPullRequests(owner, repo, state = 'open', token = null) {
+        // Token optional - needed for private repos
+        return this.request(`/repos/${owner}/${repo}/pulls?state=${state}&per_page=100`, token);
     },
     
-    async getPullRequestReviews(owner, repo, prNumber) {
-        // Public endpoint - no token required
-        return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, null);
+    async getPullRequestReviews(owner, repo, prNumber, token = null) {
+        // Token optional - needed for private repos
+        return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, token);
     },
     
     async approvePR(owner, repo, prNumber, token, comment = '', commitSha = null) {
@@ -1123,6 +1125,7 @@ const GitHubAPI = {
 function App() {
     const [repoInputs, setRepoInputs] = useState(['']);
     const [token, setToken] = useState(() => localStorage.getItem('gh_token') || '');
+    const [showAuthConfig, setShowAuthConfig] = useState(false);
     const [repos, setRepos] = useState([]); // Array of { owner, repo } objects
     const [allPRs, setAllPRs] = useState([]); // All PRs with repo info attached
     const [selectedPRs, setSelectedPRs] = useState(new Set()); // Set of "owner/repo#number" strings
@@ -1216,7 +1219,16 @@ function App() {
         }
     };
     
-    // Get the current auth token for API calls
+    // Get token for reading repos (returns null if not configured, which is fine for public repos)
+    const getReadToken = () => {
+        if (token) return token;
+        if (appToken && new Date(appToken.expiresAt) > new Date()) {
+            return appToken.token;
+        }
+        return null;
+    };
+    
+    // Get the current auth token for API calls (for approval - requires valid auth)
     const getAuthToken = async () => {
         if (authType === 'pat') {
             return token;
@@ -1251,7 +1263,18 @@ function App() {
             const results = await Promise.all(
                 batch.map(async (pr) => {
                     try {
-                        const prReviews = await GitHubAPI.getPullRequestReviews(pr._repo.owner, pr._repo.repo, pr.number);
+                        // Try with auth token, fallback to no token for public repos
+                        const readToken = getReadToken();
+                        let prReviews;
+                        try {
+                            prReviews = await GitHubAPI.getPullRequestReviews(pr._repo.owner, pr._repo.repo, pr.number, readToken);
+                        } catch (authError) {
+                            if (readToken && (authError.message.includes('401') || authError.message.includes('403') || authError.message.includes('Bad credentials'))) {
+                                prReviews = await GitHubAPI.getPullRequestReviews(pr._repo.owner, pr._repo.repo, pr.number, null);
+                            } else {
+                                throw authError;
+                            }
+                        }
                         // Get the latest review state per user
                         const reviewerStates = {};
                         prReviews.forEach(review => {
@@ -1353,7 +1376,20 @@ function App() {
             const results = await Promise.all(
                 parsedRepos.map(async (repoInfo) => {
                     try {
-                        const prs = await GitHubAPI.getPullRequests(repoInfo.owner, repoInfo.repo);
+                        // Try with auth token first
+                        const readToken = getReadToken();
+                        let prs;
+                        try {
+                            prs = await GitHubAPI.getPullRequests(repoInfo.owner, repoInfo.repo, 'open', readToken);
+                        } catch (authError) {
+                            // If auth fails (401/403), retry without token for public repos
+                            if (readToken && (authError.message.includes('401') || authError.message.includes('403') || authError.message.includes('Bad credentials'))) {
+                                console.warn(`Auth failed for ${repoInfo.owner}/${repoInfo.repo}, retrying without token...`);
+                                prs = await GitHubAPI.getPullRequests(repoInfo.owner, repoInfo.repo, 'open', null);
+                            } else {
+                                throw authError;
+                            }
+                        }
                         // Attach repo info to each PR
                         return prs.map(pr => ({
                             ...pr,
@@ -1362,6 +1398,7 @@ function App() {
                         }));
                     } catch (e) {
                         console.error(`Failed to fetch PRs from ${repoInfo.owner}/${repoInfo.repo}:`, e);
+                        showToast(`Failed to load ${repoInfo.owner}/${repoInfo.repo}: ${e.message}`, 'error');
                         return [];
                     }
                 })
@@ -1642,7 +1679,21 @@ function App() {
             <div className="toolbar">
                 <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                     <div style={{ flex: 1, minWidth: 300 }}>
-                        <label className="input-label" style={{ marginBottom: 8, display: 'block' }}>Repositories</label>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                            <label className="input-label">Repositories</label>
+                            <button
+                                className="btn"
+                                style={{ 
+                                    padding: '4px 8px', 
+                                    fontSize: 10,
+                                    opacity: (token || appToken) ? 1 : 0.7
+                                }}
+                                onClick={() => setShowAuthConfig(true)}
+                                title="Configure authentication for private repos"
+                            >
+                                🔐 {(token || appToken) ? 'Auth ✓' : 'Private repos'}
+                            </button>
+                        </div>
                         <div className="repo-inputs-container">
                             {repoInputs.map((input, index) => (
                                 <div key={index} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -1975,6 +2026,153 @@ function App() {
                     </>
                 )}
             </main>
+
+            {/* Auth Config Modal */}
+            {showAuthConfig && (
+                <div className="modal-overlay" onClick={() => setShowAuthConfig(false)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 450 }}>
+                        <div className="modal-header">
+                            <span className="modal-title">🔐 Authentication for Private Repos</span>
+                            <button className="modal-close" onClick={() => setShowAuthConfig(false)}>×</button>
+                        </div>
+                        <div className="modal-body">
+                            <p style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 16 }}>
+                                Configure authentication to access private repositories. This is also used for approving PRs.
+                            </p>
+                            
+                            {/* Auth Type Selector */}
+                            <div style={{ marginBottom: 16 }}>
+                                <label className="input-label" style={{ marginBottom: 8, display: 'block' }}>
+                                    Authentication Method
+                                </label>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <button
+                                        className={`filter-btn ${authType === 'pat' ? 'active' : ''}`}
+                                        onClick={() => setAuthType('pat')}
+                                        style={{ flex: 1, justifyContent: 'center' }}
+                                    >
+                                        🔑 PAT
+                                    </button>
+                                    <button
+                                        className={`filter-btn ${authType === 'github_app' ? 'active' : ''}`}
+                                        onClick={() => setAuthType('github_app')}
+                                        style={{ flex: 1, justifyContent: 'center' }}
+                                    >
+                                        🤖 GitHub App
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* PAT Input */}
+                            {authType === 'pat' && (
+                                <div>
+                                    <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                        Personal Access Token
+                                        {user && <span style={{ color: 'var(--green)', marginLeft: 8 }}>✓ {user.login}</span>}
+                                    </label>
+                                    <input
+                                        type="password"
+                                        className="input-field"
+                                        style={{ width: '100%', minWidth: 'unset' }}
+                                        placeholder="ghp_xxxxxxxxxxxx"
+                                        value={token}
+                                        onChange={(e) => setToken(e.target.value)}
+                                    />
+                                    <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 6 }}>
+                                        Requires <code style={{ background: 'var(--bg3)', padding: '1px 4px', borderRadius: 3 }}>repo</code> scope.{' '}
+                                        <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--acc)' }}>
+                                            Create token →
+                                        </a>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* GitHub App Input */}
+                            {authType === 'github_app' && (
+                                <div>
+                                    <div style={{ marginBottom: 12 }}>
+                                        <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                            App ID
+                                            {appToken && <span style={{ color: 'var(--green)', marginLeft: 8 }}>✓ Connected</span>}
+                                        </label>
+                                        <input
+                                            type="text"
+                                            className="input-field"
+                                            style={{ width: '100%', minWidth: 'unset' }}
+                                            placeholder="123456"
+                                            value={appId}
+                                            onChange={(e) => setAppId(e.target.value)}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                            Private Key (PEM)
+                                        </label>
+                                        <textarea
+                                            className="input-field"
+                                            style={{ 
+                                                width: '100%', 
+                                                minWidth: 'unset', 
+                                                minHeight: 100, 
+                                                fontFamily: 'monospace',
+                                                fontSize: 10,
+                                                resize: 'vertical'
+                                            }}
+                                            placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"
+                                            value={privateKey}
+                                            onChange={(e) => setPrivateKey(e.target.value)}
+                                        />
+                                    </div>
+                                    <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 6 }}>
+                                        App must be installed on the repository.{' '}
+                                        <a href="https://docs.github.com/en/apps/creating-github-apps" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--acc)' }}>
+                                            Learn more →
+                                        </a>
+                                    </div>
+                                </div>
+                            )}
+
+                            {appError && (
+                                <div style={{ 
+                                    marginTop: 12, 
+                                    padding: '10px 12px', 
+                                    background: 'var(--red-bg)', 
+                                    border: '1px solid var(--red)',
+                                    borderRadius: 6,
+                                    fontSize: 11,
+                                    color: 'var(--red)'
+                                }}>
+                                    ⚠️ {appError}
+                                </div>
+                            )}
+                        </div>
+                        <div className="modal-footer">
+                            {(token || (appId && privateKey)) && (
+                                <button 
+                                    className="btn" 
+                                    style={{ color: 'var(--red)' }}
+                                    onClick={() => {
+                                        setToken('');
+                                        setUser(null);
+                                        setAppId('');
+                                        setPrivateKey('');
+                                        setAppToken(null);
+                                        localStorage.removeItem('gh_token');
+                                        localStorage.removeItem('gh_app_id');
+                                        localStorage.removeItem('gh_private_key');
+                                        showToast('Credentials cleared', 'success');
+                                    }}
+                                >
+                                    Clear All
+                                </button>
+                            )}
+                            <button className="btn primary" onClick={() => setShowAuthConfig(false)}>
+                                Done
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Approval Modal */}
             {showModal && (
