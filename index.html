@@ -60,11 +60,27 @@ body {
 .header {
     background: var(--bg1);
     border-bottom: 1px solid var(--border);
-    padding: 16px 24px;
+    padding: 12px 24px;
     display: flex;
     align-items: center;
-    gap: 24px;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.toolbar {
+    background: transparent;
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.repo-inputs-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .logo {
@@ -1105,7 +1121,7 @@ const GitHubAPI = {
 };
 
 function App() {
-    const [repoInput, setRepoInput] = useState('');
+    const [repoInputs, setRepoInputs] = useState(['']);
     const [token, setToken] = useState(() => localStorage.getItem('gh_token') || '');
     const [repos, setRepos] = useState([]); // Array of { owner, repo } objects
     const [allPRs, setAllPRs] = useState([]); // All PRs with repo info attached
@@ -1279,29 +1295,48 @@ function App() {
         return reviews;
     };
 
-    // Parse multiple repo inputs (comma, newline, or space separated)
-    const parseMultipleRepos = (input) => {
-        const lines = input.split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
+    // Parse repo inputs array
+    const parseRepoInputs = () => {
         const parsed = [];
-        for (const line of lines) {
-            const repo = GitHubAPI.parseRepoInput(line);
-            if (repo) {
-                parsed.push(repo);
+        for (const input of repoInputs) {
+            const trimmed = input.trim();
+            if (trimmed) {
+                const repo = GitHubAPI.parseRepoInput(trimmed);
+                if (repo) {
+                    parsed.push(repo);
+                }
             }
         }
         return parsed;
     };
+    
+    // Add a new repo input field
+    const addRepoInput = () => {
+        setRepoInputs([...repoInputs, '']);
+    };
+    
+    // Remove a repo input field
+    const removeRepoInput = (index) => {
+        if (repoInputs.length > 1) {
+            setRepoInputs(repoInputs.filter((_, i) => i !== index));
+        } else {
+            setRepoInputs(['']);
+        }
+    };
+    
+    // Update a repo input field
+    const updateRepoInput = (index, value) => {
+        const newInputs = [...repoInputs];
+        newInputs[index] = value;
+        setRepoInputs(newInputs);
+    };
 
     // Fetch PRs from multiple repos
     const fetchPRs = async () => {
-        if (!repoInput.trim()) {
-            setError('Please enter at least one repository');
-            return;
-        }
-
-        const parsedRepos = parseMultipleRepos(repoInput);
+        const parsedRepos = parseRepoInputs();
+        
         if (parsedRepos.length === 0) {
-            setError('Invalid repository format. Use: owner/repo or GitHub URL (one per line or comma-separated)');
+            setError('Please enter at least one valid repository');
             return;
         }
 
@@ -1495,11 +1530,66 @@ function App() {
         }, 2500);
     };
 
+    // Export PR list as Markdown
+    const exportAsMarkdown = () => {
+        const prsToExport = filteredPRs;
+        if (prsToExport.length === 0) {
+            showToast('No PRs to export', 'error');
+            return;
+        }
+        
+        const now = new Date().toISOString().split('T')[0];
+        let md = `# Pull Requests Export\n\n`;
+        md += `**Date:** ${now}\n`;
+        md += `**Total PRs:** ${prsToExport.length}\n\n`;
+        
+        // Group by repo if multiple repos
+        const byRepo = {};
+        prsToExport.forEach(pr => {
+            const repoKey = `${pr._repo.owner}/${pr._repo.repo}`;
+            if (!byRepo[repoKey]) byRepo[repoKey] = [];
+            byRepo[repoKey].push(pr);
+        });
+        
+        Object.entries(byRepo).forEach(([repoName, prs]) => {
+            md += `## ${repoName}\n\n`;
+            md += `| # | Title | Author | Status | Labels | Created |\n`;
+            md += `|---|-------|--------|--------|--------|--------|\n`;
+            
+            prs.forEach(pr => {
+                const review = prReviews[pr._key];
+                const status = review 
+                    ? (review.approved ? '✅ Approved' : review.hasChangesRequested ? '❌ Changes Requested' : '⏳ Awaiting Review')
+                    : '⏳ Awaiting Review';
+                const labels = pr.labels.map(l => `\`${l.name}\``).join(', ') || '-';
+                const created = new Date(pr.created_at).toLocaleDateString();
+                const title = pr.title.replace(/\|/g, '\\|').substring(0, 60) + (pr.title.length > 60 ? '...' : '');
+                
+                md += `| [#${pr.number}](${pr.html_url}) | ${title} | @${pr.user.login} | ${status} | ${labels} | ${created} |\n`;
+            });
+            
+            md += `\n`;
+        });
+        
+        // Download the file
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `pr-export-${now}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        showToast(`Exported ${prsToExport.length} PRs to Markdown`, 'success');
+    };
+
     const filteredPRs = getFilteredPRs();
 
     return (
         <div className="app">
-            {/* Header */}
+            {/* Header - App Name */}
             <header className="header">
                 <div className="logo">
                     <div className="logo-mark">✓</div>
@@ -1507,70 +1597,97 @@ function App() {
                     <span className="logo-sub">Bulk approve GitHub PRs</span>
                 </div>
 
-                <div className="input-section">
-                    <div className="input-group">
-                        <label className="input-label">Repositories (one per line or comma-separated)</label>
-                        <textarea
-                            className="input-field"
-                            style={{ minHeight: 38, maxHeight: 100, resize: 'vertical' }}
-                            placeholder="owner/repo, another/repo or GitHub URLs"
-                            value={repoInput}
-                            onChange={(e) => setRepoInput(e.target.value)}
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                    e.preventDefault();
-                                    fetchPRs();
-                                }
-                            }}
-                            rows={1}
-                        />
+                {(user || appToken) && (
+                    <div 
+                        style={{ 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            gap: 8, 
+                            padding: '8px 12px',
+                            background: 'var(--green-bg)',
+                            borderRadius: 8,
+                            fontSize: 11,
+                            color: 'var(--green)',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                        }}
+                        onClick={() => {
+                            if (user) {
+                                setToken('');
+                                setUser(null);
+                                localStorage.removeItem('gh_token');
+                                showToast('Signed out', 'success');
+                            }
+                            if (appToken) {
+                                setAppToken(null);
+                                setAppId('');
+                                setPrivateKey('');
+                                localStorage.removeItem('gh_app_id');
+                                localStorage.removeItem('gh_private_key');
+                                showToast('GitHub App disconnected', 'success');
+                            }
+                        }}
+                        title="Click to sign out"
+                    >
+                        {user ? (
+                            <>✓ Signed in as <strong>{user.login}</strong> <span style={{ opacity: 0.7 }}>(click to sign out)</span></>
+                        ) : (
+                            <>🤖 GitHub App authenticated <span style={{ opacity: 0.7 }}>(click to disconnect)</span></>
+                        )}
+                    </div>
+                )}
+            </header>
+
+            {/* Toolbar - Repository Inputs */}
+            <div className="toolbar">
+                <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: 300 }}>
+                        <label className="input-label" style={{ marginBottom: 8, display: 'block' }}>Repositories</label>
+                        <div className="repo-inputs-container">
+                            {repoInputs.map((input, index) => (
+                                <div key={index} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                    <input
+                                        type="text"
+                                        className="input-field"
+                                        style={{ minWidth: 240, flex: 1 }}
+                                        placeholder="owner/repo or GitHub URL"
+                                        value={input}
+                                        onChange={(e) => updateRepoInput(index, e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                fetchPRs();
+                                            }
+                                        }}
+                                    />
+                                    <button
+                                        className="btn"
+                                        style={{ padding: '8px 10px', minWidth: 32 }}
+                                        onClick={() => removeRepoInput(index)}
+                                        title="Remove repository"
+                                    >
+                                        −
+                                    </button>
+                                    {index === repoInputs.length - 1 && (
+                                        <button
+                                            className="btn"
+                                            style={{ padding: '8px 10px', minWidth: 32, color: 'var(--green)' }}
+                                            onClick={addRepoInput}
+                                            title="Add repository"
+                                        >
+                                            +
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
                     </div>
 
-                    <button className="btn primary" onClick={fetchPRs} disabled={loading}>
+                    <button className="btn primary" onClick={fetchPRs} disabled={loading} style={{ marginTop: 24 }}>
                         {loading ? '⏳' : '🔍'} Load PRs
                     </button>
-
-                    {(user || appToken) && (
-                        <div 
-                            style={{ 
-                                display: 'flex', 
-                                alignItems: 'center', 
-                                gap: 8, 
-                                padding: '8px 12px',
-                                background: 'var(--green-bg)',
-                                borderRadius: 8,
-                                fontSize: 11,
-                                color: 'var(--green)',
-                                cursor: 'pointer',
-                                transition: 'all 0.2s'
-                            }}
-                            onClick={() => {
-                                if (user) {
-                                    setToken('');
-                                    setUser(null);
-                                    localStorage.removeItem('gh_token');
-                                    showToast('Signed out', 'success');
-                                }
-                                if (appToken) {
-                                    setAppToken(null);
-                                    setAppId('');
-                                    setPrivateKey('');
-                                    localStorage.removeItem('gh_app_id');
-                                    localStorage.removeItem('gh_private_key');
-                                    showToast('GitHub App disconnected', 'success');
-                                }
-                            }}
-                            title="Click to sign out"
-                        >
-                            {user ? (
-                                <>✓ Signed in as <strong>{user.login}</strong> <span style={{ opacity: 0.7 }}>(click to sign out)</span></>
-                            ) : (
-                                <>🤖 GitHub App authenticated <span style={{ opacity: 0.7 }}>(click to disconnect)</span></>
-                            )}
-                        </div>
-                    )}
                 </div>
-            </header>
+            </div>
 
             {/* Main Content */}
             <main className="main">
@@ -1701,6 +1818,14 @@ function App() {
                                     {selectedPRs.size === filteredPRs.length && filteredPRs.length > 0 ? '☐ Deselect All' : '☑ Select All'}
                                 </button>
                                 <button
+                                    className="btn"
+                                    onClick={exportAsMarkdown}
+                                    disabled={filteredPRs.length === 0}
+                                    title="Export PR list as Markdown"
+                                >
+                                    📄 Export MD
+                                </button>
+                                <button
                                     className="btn primary"
                                     onClick={() => { setApprovalProgress({ current: 0, total: 0, results: [] }); setShowModal(true); }}
                                     disabled={selectedPRs.size === 0}
@@ -1777,6 +1902,22 @@ function App() {
                                                                     : '⏳ Awaiting review'}
                                                         </span>
                                                     )}
+                                                    {/* Show labels inline in compact view */}
+                                                    {compactView && pr.labels.length > 0 && pr.labels.map(label => (
+                                                        <span
+                                                            key={label.id}
+                                                            className={`label ${label.name.toLowerCase() === 'needs-review' ? 'needs-review' : ''}`}
+                                                            style={{
+                                                                backgroundColor: `#${label.color}22`,
+                                                                color: `#${label.color}`,
+                                                                borderColor: `#${label.color}`,
+                                                                padding: '2px 6px',
+                                                                fontSize: 9,
+                                                            }}
+                                                        >
+                                                            {label.name}
+                                                        </span>
+                                                    ))}
                                                 </div>
                                                 <div className="pr-name" style={compactView ? { fontSize: 13, marginTop: 4 } : {}}>
                                                     {pr.title}
@@ -1851,7 +1992,8 @@ function App() {
                                 <div className="approval-text">pull requests will be approved</div>
                             </div>
 
-                            {approving && (
+                            {/* Show progress/results during and after approval */}
+                            {(approving || approvalProgress.results.length > 0) && (
                                 <>
                                     <div className="progress-bar">
                                         <div 
@@ -1860,7 +2002,10 @@ function App() {
                                         />
                                     </div>
                                     <div style={{ fontSize: 12, color: 'var(--t2)', marginTop: 8, textAlign: 'center' }}>
-                                        Processing {approvalProgress.current} of {approvalProgress.total}...
+                                        {approving 
+                                            ? `Processing ${approvalProgress.current} of ${approvalProgress.total}...`
+                                            : `Completed: ${approvalProgress.results.filter(r => r.success).length} of ${approvalProgress.results.length} approved`
+                                        }
                                     </div>
                                     <div className="approval-list" style={{ marginTop: 16 }}>
                                         {approvalProgress.results.map((r, i) => (
@@ -1914,7 +2059,8 @@ function App() {
                                 </>
                             )}
 
-                            {!approving && (
+                            {/* Show pending PRs list before approval starts */}
+                            {!approving && approvalProgress.results.length === 0 && (
                                 <>
                                     <div className="approval-list">
                                         {Array.from(selectedPRs).map(prKey => {
