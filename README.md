@@ -1,6 +1,6 @@
-# ✅ PR Approver
+# ✅ PR Manager
 
-> 🚀 **Bulk approve GitHub Pull Requests** with a sleek, modern web interface. No installation required!
+> 🚀 **Approve, label, and merge GitHub Pull Requests** with a sleek, modern web interface. No installation required!
 
 ![GitHub](https://img.shields.io/badge/GitHub-PRs-blue?logo=github)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -13,8 +13,10 @@
 | Feature | Description |
 |---------|-------------|
 | 🔄 **Bulk Approval** | Approve multiple PRs at once across multiple repositories |
-| 🏷️ **Label Management** | Automatically remove `needs-review` labels after approval |
-| 🔍 **Smart Filtering** | Filter PRs by approval status or labels |
+| 🏷️ **Label Management** | Add, edit, recolor, rename, or delete labels — per PR or repo-wide |
+| 🔎 **Label Filtering** | Filter the PR list by one or more labels (any-of) |
+| ⤴️ **Merge PRs** | Merge with `merge`, `squash`, or `rebase` — with mergeability gating |
+| 🚦 **Blocker Insights** | Surfaces conflicts, failing checks, branch protection, draft state |
 | 🔐 **Flexible Auth** | Support for Personal Access Tokens & GitHub Apps |
 | 📱 **Responsive UI** | Modern dark theme with mobile-friendly design |
 | ⚡ **No Install** | Single HTML file - just open in your browser |
@@ -27,10 +29,10 @@
 
 ```bash
 # Clone the repository
-git clone git@github.com:fulviofreitas/github-pr-approver.git
+git clone git@github.com:fulviofreitas/github-pr-manager.git
 
 # Open in browser
-open github-pr-approver/index.html
+open github-pr-manager/index.html
 ```
 
 That's it! 🎉
@@ -72,16 +74,19 @@ https://github.com/owner/repo
 - Use filters to focus on PRs that need attention:
   - ⏳ **Missing Approval** - PRs awaiting review
   - 🏷️ **needs-review** - PRs with the needs-review label
+  - 🏷️ **Labels** - Filter by any label across the loaded PRs (any-of)
 
-### 3️⃣ Select & Approve
-1. Check the PRs you want to approve
-2. Click **"Approve Selected"**
-3. Enter your authentication:
+### 3️⃣ Approve, Label, or Merge
+- **Approve in bulk:** check PRs, click **"Approve Selected"**, optionally remove `needs-review`
+- **Edit labels (per PR):** click 🏷️ on a row to toggle existing repo labels or create a new one
+- **Manage labels (repo-wide):** click ⚙️ **Manage Labels** to rename, recolor, or delete labels
+- **Merge a PR:** click ⤴️ on a row — pick a strategy (`merge` / `squash` / `rebase`), see mergeability state, conflicts, or branch-protection blockers before confirming
+- All write actions need authentication:
    - 🔑 **Personal Access Token** (PAT) with `repo` scope
    - 🤖 **GitHub App** with required permissions
 
 ### 4️⃣ Done! ✅
-Your PRs are approved and labels are optionally removed.
+PRs reflect their new state immediately — merged PRs leave the open list, label changes update inline.
 
 ---
 
@@ -90,14 +95,15 @@ Your PRs are approved and labels are optionally removed.
 ### Personal Access Token (Recommended for personal use)
 
 1. Go to [GitHub Settings → Tokens](https://github.com/settings/tokens/new?scopes=repo)
-2. Generate a token with `repo` scope
-3. Paste it in the approval modal
+2. Generate a token with `repo` scope (covers approve, label, and merge)
+3. Paste it in the auth config or approval modal
 
 ### GitHub App (Recommended for teams/organizations)
 
 Required permissions:
-- `Pull requests: Write` — to approve PRs
-- `Issues: Write` — to remove labels
+- `Pull requests: Write` — to approve and merge PRs
+- `Issues: Write` — to add, remove, and manage labels
+- `Contents: Read` — to read repository merge-strategy settings
 
 [📚 Learn more about creating GitHub Apps](https://docs.github.com/en/apps/creating-github-apps)
 
@@ -117,7 +123,20 @@ Required permissions:
 - ⚛️ **React 18** - UI library
 - 🎨 **CSS Variables** - Dark theme with customizable colors
 - 🔒 **jsrsasign** - JWT generation for GitHub App auth
-- 📡 **GitHub REST API** - PR and label management
+- 📡 **GitHub REST API** - PR review, labels, and merge endpoints
+
+---
+
+## 🧪 Tests
+
+Tests run with the Node built-in test runner — no browser required.
+
+```bash
+npm ci
+npm test
+```
+
+The CI workflow (`.github/workflows/ci.yml`) runs on every push and pull request.
 
 ---
 

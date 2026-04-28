@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PR Approver — Bulk Approve GitHub Pull Requests</title>
-    <meta name="description" content="Quickly approve GitHub PRs and manage review labels. No installation required.">
+    <title>PR Manager — Approve, Label, and Merge GitHub Pull Requests</title>
+    <meta name="description" content="Approve, label, and merge GitHub PRs from one screen. No installation required.">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✅</text></svg>">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -1261,7 +1261,7 @@ function App() {
     const [showModal, setShowModal] = useState(false);
     const [approving, setApproving] = useState(false);
     const [approvalProgress, setApprovalProgress] = useState({ current: 0, total: 0, results: [] });
-    const [approvalComment, setApprovalComment] = useState('Approved via PR Approver tool ✅');
+    const [approvalComment, setApprovalComment] = useState('Approved via PR Manager tool ✅');
     const [removeNeedsReview, setRemoveNeedsReview] = useState(true);
     const [filterNeedsReview, setFilterNeedsReview] = useState(false);
     const [filterMissingApproval, setFilterMissingApproval] = useState(true);
@@ -2086,8 +2086,8 @@ function App() {
             <header className="header">
                 <div className="logo">
                     <div className="logo-mark">✓</div>
-                    <span className="logo-text" style={{ color: 'var(--acc)' }}>PR Approver</span>
-                    <span className="logo-sub">Bulk approve GitHub PRs</span>
+                    <span className="logo-text" style={{ color: 'var(--acc)' }}>PR Manager</span>
+                    <span className="logo-sub">Approve, label, and merge GitHub PRs</span>
                 </div>
 
                 {(user || appToken) && (
@@ -2212,9 +2212,9 @@ function App() {
                 {repos.length === 0 && !loading && (
                     <div className="welcome">
                         <div className="welcome-icon">🚀</div>
-                        <h1 className="welcome-title">Welcome to PR Approver</h1>
+                        <h1 className="welcome-title">Welcome to PR Manager</h1>
                         <p className="welcome-desc">
-                            Quickly approve multiple GitHub pull requests and automatically remove the <code>needs-review</code> label. Perfect for maintainers managing busy repositories.
+                            Approve, label, and merge GitHub pull requests across multiple repositories from a single screen. Perfect for maintainers managing busy repos.
                         </p>
                         <div className="welcome-steps">
                             <div className="welcome-step">
