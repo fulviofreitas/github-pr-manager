@@ -868,7 +868,19 @@ body {
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 
+// Parses a Link header (RFC 5988) and returns the URL for the requested rel.
+function parseLinkHeader(header, rel) {
+    if (!header) return null;
+    const parts = header.split(',');
+    for (const part of parts) {
+        const m = part.match(/<([^>]+)>;\s*rel="([^"]+)"/);
+        if (m && m[2] === rel) return m[1];
+    }
+    return null;
+}
+
 // GitHub API helper
+// === BEGIN GitHubAPI === (marker — used by tests to extract this object literal)
 const GitHubAPI = {
     baseUrl: 'https://api.github.com',
     
@@ -901,24 +913,24 @@ const GitHubAPI = {
             'X-GitHub-Api-Version': '2022-11-28',
             ...options.headers,
         };
-        
+
         // Only add Authorization header if token is provided
         if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
-        
+
         // Add Content-Type for requests with body
         if (options.body) {
             headers['Content-Type'] = 'application/json';
         }
-        
+
         console.log(`[GitHub API] ${options.method || 'GET'} ${endpoint}`);
-        
+
         const response = await fetch(`${this.baseUrl}${endpoint}`, {
             ...options,
             headers,
         });
-        
+
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             console.error(`[GitHub API] Error:`, error);
@@ -929,11 +941,36 @@ const GitHubAPI = {
                 errorMsg += ` (${details})`;
                 console.error(`[GitHub API] Error details:`, error.errors);
             }
-            throw new Error(errorMsg);
+            const err = new Error(errorMsg);
+            err.status = response.status;
+            err.data = error;
+            throw err;
         }
-        
+
         if (response.status === 204) return null;
+        if (options._returnResponse) {
+            const json = await response.json();
+            return { data: json, headers: response.headers };
+        }
         return response.json();
+    },
+
+    // Paginate a list endpoint by following the Link header. Caps at maxPages
+    // to keep edge cases (huge label sets) bounded. Returns flat array.
+    async paginate(endpoint, token, { perPage = 100, maxPages = 10 } = {}) {
+        const sep = endpoint.includes('?') ? '&' : '?';
+        let url = `${endpoint}${sep}per_page=${perPage}&page=1`;
+        const all = [];
+        for (let page = 1; page <= maxPages; page++) {
+            const { data, headers } = await this.request(url, token, { _returnResponse: true });
+            if (Array.isArray(data)) all.push(...data); else return data;
+            const link = headers && headers.get && headers.get('link');
+            const next = parseLinkHeader(link, 'next');
+            if (!next) break;
+            // Strip baseUrl so request() can prepend it again.
+            url = next.startsWith(this.baseUrl) ? next.slice(this.baseUrl.length) : next;
+        }
+        return all;
     },
     
     async getPullRequests(owner, repo, state = 'open', token = null) {
@@ -1120,7 +1157,95 @@ const GitHubAPI = {
             installation: installation,
         };
     },
+
+    // ---------------- Repository metadata ----------------
+
+    async getRepository(owner, repo, token = null) {
+        return this.request(`/repos/${owner}/${repo}`, token);
+    },
+
+    async getPullRequest(owner, repo, prNumber, token = null) {
+        return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}`, token);
+    },
+
+    // ---------------- Labels: repo-level ----------------
+
+    async listRepoLabels(owner, repo, token = null) {
+        return this.paginate(`/repos/${owner}/${repo}/labels`, token, { perPage: 100, maxPages: 10 });
+    },
+
+    async createRepoLabel(owner, repo, { name, color, description }, token) {
+        return this.request(`/repos/${owner}/${repo}/labels`, token, {
+            method: 'POST',
+            body: JSON.stringify({ name, color, description }),
+        });
+    },
+
+    async updateRepoLabel(owner, repo, currentName, { new_name, color, description }, token) {
+        const body = {};
+        if (new_name !== undefined) body.new_name = new_name;
+        if (color !== undefined) body.color = color;
+        if (description !== undefined) body.description = description;
+        return this.request(`/repos/${owner}/${repo}/labels/${encodeURIComponent(currentName)}`, token, {
+            method: 'PATCH',
+            body: JSON.stringify(body),
+        });
+    },
+
+    async deleteRepoLabel(owner, repo, name, token) {
+        return this.request(`/repos/${owner}/${repo}/labels/${encodeURIComponent(name)}`, token, {
+            method: 'DELETE',
+        });
+    },
+
+    // ---------------- Labels: per-issue (PRs) ----------------
+
+    async addLabelsToIssue(owner, repo, issueNumber, labels, token) {
+        return this.request(`/repos/${owner}/${repo}/issues/${issueNumber}/labels`, token, {
+            method: 'POST',
+            body: JSON.stringify({ labels }),
+        });
+    },
+
+    async setIssueLabels(owner, repo, issueNumber, labels, token) {
+        return this.request(`/repos/${owner}/${repo}/issues/${issueNumber}/labels`, token, {
+            method: 'PUT',
+            body: JSON.stringify({ labels }),
+        });
+    },
+
+    // ---------------- Merge ----------------
+
+    // Returns { allowed: ['merge'|'squash'|'rebase'], default: <strategy> } based on repo settings.
+    repoAllowedMergeStrategies(repository) {
+        const allowed = [];
+        if (!repository) return { allowed: ['merge', 'squash', 'rebase'], default: 'merge' };
+        // GitHub omits these fields for some accounts; default to permissive.
+        const merge = repository.allow_merge_commit !== false;
+        const squash = repository.allow_squash_merge !== false;
+        const rebase = repository.allow_rebase_merge !== false;
+        if (merge) allowed.push('merge');
+        if (squash) allowed.push('squash');
+        if (rebase) allowed.push('rebase');
+        // GitHub doesn't expose a per-repo "default" merge strategy, so prefer
+        // squash > merge > rebase (matches the most common org defaults).
+        const order = ['squash', 'merge', 'rebase'];
+        const def = order.find(s => allowed.includes(s)) || allowed[0] || 'merge';
+        return { allowed: allowed.length ? allowed : ['merge'], default: def };
+    },
+
+    async mergePullRequest(owner, repo, prNumber, { merge_method, commit_title, commit_message, sha }, token) {
+        const body = { merge_method };
+        if (commit_title) body.commit_title = commit_title;
+        if (commit_message) body.commit_message = commit_message;
+        if (sha) body.sha = sha;
+        return this.request(`/repos/${owner}/${repo}/pulls/${prNumber}/merge`, token, {
+            method: 'PUT',
+            body: JSON.stringify(body),
+        });
+    },
 };
+// === END GitHubAPI ===
 
 function App() {
     const [repoInputs, setRepoInputs] = useState(['']);
@@ -1151,6 +1276,32 @@ function App() {
     const [appToken, setAppToken] = useState(null);
     const [appTokenLoading, setAppTokenLoading] = useState(false);
     const [appError, setAppError] = useState(null);
+
+    // Label management state
+    // repoLabels: { "owner/repo": [labelObjects...] }
+    const [repoLabels, setRepoLabels] = useState({});
+    const [labelFilter, setLabelFilter] = useState(new Set()); // Set of lowercased label names
+    const [showLabelFilter, setShowLabelFilter] = useState(false);
+    const [labelEditorPR, setLabelEditorPR] = useState(null); // PR object whose labels are being edited
+    const [labelEditorSelected, setLabelEditorSelected] = useState(new Set()); // Set of label names
+    const [labelEditorNew, setLabelEditorNew] = useState(''); // New label being typed
+    const [labelEditorBusy, setLabelEditorBusy] = useState(false);
+    const [labelManagerRepo, setLabelManagerRepo] = useState(null); // {owner, repo} whose labels are being managed
+    const [labelManagerEditing, setLabelManagerEditing] = useState(null); // current label being edited
+    const [labelManagerDraft, setLabelManagerDraft] = useState({ name: '', color: '', description: '' });
+    const [labelManagerBusy, setLabelManagerBusy] = useState(false);
+
+    // Merge state
+    const [mergePR, setMergePR] = useState(null); // PR object being merged
+    const [mergeDetails, setMergeDetails] = useState(null); // full PR detail with mergeable/mergeable_state
+    const [mergeStrategy, setMergeStrategy] = useState('merge');
+    const [mergeAllowed, setMergeAllowed] = useState(['merge', 'squash', 'rebase']);
+    const [mergeCommitTitle, setMergeCommitTitle] = useState('');
+    const [mergeCommitMessage, setMergeCommitMessage] = useState('');
+    const [mergeChecking, setMergeChecking] = useState(false);
+    const [mergeBusy, setMergeBusy] = useState(false);
+    const [mergeError, setMergeError] = useState(null);
+    const [mergeDone, setMergeDone] = useState(false);
 
     // Show toast notification
     const showToast = useCallback((message, type = 'success') => {
@@ -1446,21 +1597,326 @@ function App() {
     // Get filtered PRs
     const getFilteredPRs = () => {
         let filtered = allPRs;
-        
+
         if (filterMissingApproval) {
             filtered = filtered.filter(pr => {
                 const review = prReviews[pr._key];
                 return !review || !review.approved;
             });
         }
-        
+
         if (filterNeedsReview) {
-            filtered = filtered.filter(pr => 
+            filtered = filtered.filter(pr =>
                 pr.labels.some(l => l.name.toLowerCase() === 'needs-review')
             );
         }
-        
+
+        if (labelFilter.size > 0) {
+            // ANY-of: PR matches if it has at least one of the selected labels
+            filtered = filtered.filter(pr =>
+                pr.labels.some(l => labelFilter.has(l.name.toLowerCase()))
+            );
+        }
+
         return filtered;
+    };
+
+    // All distinct labels currently visible across loaded PRs (used for the filter chip).
+    const getAllVisibleLabels = () => {
+        const seen = new Map(); // lowercased name -> label object
+        for (const pr of allPRs) {
+            for (const l of pr.labels || []) {
+                const key = l.name.toLowerCase();
+                if (!seen.has(key)) seen.set(key, l);
+            }
+        }
+        return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+    };
+
+    // Toggle a label in the active filter
+    const toggleLabelFilter = (labelName) => {
+        const next = new Set(labelFilter);
+        const key = labelName.toLowerCase();
+        if (next.has(key)) next.delete(key); else next.add(key);
+        setLabelFilter(next);
+    };
+
+    // Lazy-load labels for a repo (cached in repoLabels state)
+    const ensureRepoLabels = async (owner, repo) => {
+        const key = `${owner}/${repo}`;
+        if (repoLabels[key]) return repoLabels[key];
+        try {
+            const labels = await GitHubAPI.listRepoLabels(owner, repo, getReadToken());
+            setRepoLabels(prev => ({ ...prev, [key]: labels }));
+            return labels;
+        } catch (e) {
+            console.error('Failed to load repo labels', e);
+            showToast(`Could not load labels for ${owner}/${repo}: ${e.message}`, 'error');
+            return [];
+        }
+    };
+
+    // Update a PR's labels in local state without re-fetching the entire list.
+    const updateLocalPRLabels = (prKey, newLabels) => {
+        setAllPRs(prev => prev.map(pr => pr._key === prKey ? { ...pr, labels: newLabels } : pr));
+    };
+
+    // Open the per-PR label editor
+    const openLabelEditor = async (pr) => {
+        setLabelEditorPR(pr);
+        setLabelEditorSelected(new Set(pr.labels.map(l => l.name)));
+        setLabelEditorNew('');
+        await ensureRepoLabels(pr._repo.owner, pr._repo.repo);
+    };
+
+    // Save the per-PR label changes via PUT (replaces full list)
+    const saveLabelEditor = async () => {
+        if (!labelEditorPR) return;
+        const authToken = await getAuthToken();
+        if (!authToken) {
+            showToast('Authentication required to edit labels', 'error');
+            return;
+        }
+        setLabelEditorBusy(true);
+        try {
+            const desired = Array.from(labelEditorSelected);
+            const updated = await GitHubAPI.setIssueLabels(
+                labelEditorPR._repo.owner,
+                labelEditorPR._repo.repo,
+                labelEditorPR.number,
+                desired,
+                authToken
+            );
+            updateLocalPRLabels(labelEditorPR._key, updated || []);
+            // Also refresh repo labels (PUT may have implicitly created new ones)
+            const repoKey = `${labelEditorPR._repo.owner}/${labelEditorPR._repo.repo}`;
+            try {
+                const fresh = await GitHubAPI.listRepoLabels(labelEditorPR._repo.owner, labelEditorPR._repo.repo, authToken);
+                setRepoLabels(prev => ({ ...prev, [repoKey]: fresh }));
+            } catch (_) { /* non-fatal */ }
+            showToast('Labels updated', 'success');
+            setLabelEditorPR(null);
+        } catch (e) {
+            console.error('Failed to update labels', e);
+            showToast(`Failed to update labels: ${e.message}`, 'error');
+        } finally {
+            setLabelEditorBusy(false);
+        }
+    };
+
+    // Add (or create then add) a label from the editor's "new label" input.
+    const addNewLabelFromEditor = async () => {
+        const name = labelEditorNew.trim();
+        if (!name) return;
+        // Just toggle it into the selected set; PUT-on-save will create it server-side
+        // if it doesn't exist yet (this is GitHub's behavior for the issues/labels PUT).
+        const next = new Set(labelEditorSelected);
+        next.add(name);
+        setLabelEditorSelected(next);
+        setLabelEditorNew('');
+    };
+
+    // ----- Repo-level label management -----
+
+    const openLabelManager = async (repoInfo) => {
+        setLabelManagerRepo(repoInfo);
+        setLabelManagerEditing(null);
+        setLabelManagerDraft({ name: '', color: '', description: '' });
+        await ensureRepoLabels(repoInfo.owner, repoInfo.repo);
+    };
+
+    const startEditLabel = (label) => {
+        setLabelManagerEditing(label.name);
+        setLabelManagerDraft({
+            name: label.name,
+            color: label.color || '',
+            description: label.description || '',
+        });
+    };
+
+    const startCreateLabel = () => {
+        setLabelManagerEditing('__new__');
+        setLabelManagerDraft({ name: '', color: 'cccccc', description: '' });
+    };
+
+    const saveManagedLabel = async () => {
+        if (!labelManagerRepo) return;
+        const authToken = await getAuthToken();
+        if (!authToken) {
+            showToast('Authentication required to manage labels', 'error');
+            return;
+        }
+        const { owner, repo } = labelManagerRepo;
+        const repoKey = `${owner}/${repo}`;
+        const draft = { ...labelManagerDraft };
+        // Normalize hex color (strip leading # if present)
+        if (draft.color && draft.color.startsWith('#')) draft.color = draft.color.slice(1);
+        if (!draft.name.trim()) {
+            showToast('Label name is required', 'error');
+            return;
+        }
+        if (draft.color && !/^[0-9a-fA-F]{6}$/.test(draft.color)) {
+            showToast('Color must be a 6-digit hex (e.g. ff7b72)', 'error');
+            return;
+        }
+        setLabelManagerBusy(true);
+        try {
+            if (labelManagerEditing === '__new__') {
+                await GitHubAPI.createRepoLabel(owner, repo, {
+                    name: draft.name.trim(),
+                    color: draft.color || 'cccccc',
+                    description: draft.description || '',
+                }, authToken);
+                showToast(`Label "${draft.name}" created`, 'success');
+            } else {
+                const original = labelManagerEditing;
+                await GitHubAPI.updateRepoLabel(owner, repo, original, {
+                    new_name: draft.name.trim() !== original ? draft.name.trim() : undefined,
+                    color: draft.color || undefined,
+                    description: draft.description !== undefined ? draft.description : undefined,
+                }, authToken);
+                showToast(`Label "${original}" updated`, 'success');
+                // If renamed, update PRs that referenced the old name (local state only —
+                // GitHub's PATCH on the label updates references server-side automatically).
+                if (draft.name.trim() !== original) {
+                    setAllPRs(prev => prev.map(pr => {
+                        if (pr._repo.owner !== owner || pr._repo.repo !== repo) return pr;
+                        return {
+                            ...pr,
+                            labels: pr.labels.map(l => l.name === original ? { ...l, name: draft.name.trim() } : l),
+                        };
+                    }));
+                }
+            }
+            // Refresh repo labels
+            const fresh = await GitHubAPI.listRepoLabels(owner, repo, authToken);
+            setRepoLabels(prev => ({ ...prev, [repoKey]: fresh }));
+            setLabelManagerEditing(null);
+        } catch (e) {
+            console.error('Failed to save label', e);
+            // Surface conflict on duplicate name (422)
+            const detail = e.status === 422 ? ' (a label with this name may already exist)' : '';
+            showToast(`Failed to save label: ${e.message}${detail}`, 'error');
+        } finally {
+            setLabelManagerBusy(false);
+        }
+    };
+
+    const deleteManagedLabel = async (labelName) => {
+        if (!labelManagerRepo) return;
+        if (!confirm(`Delete label "${labelName}" from the repository? This removes it from all issues and PRs.`)) return;
+        const authToken = await getAuthToken();
+        if (!authToken) {
+            showToast('Authentication required to manage labels', 'error');
+            return;
+        }
+        const { owner, repo } = labelManagerRepo;
+        const repoKey = `${owner}/${repo}`;
+        setLabelManagerBusy(true);
+        try {
+            await GitHubAPI.deleteRepoLabel(owner, repo, labelName, authToken);
+            const fresh = await GitHubAPI.listRepoLabels(owner, repo, authToken);
+            setRepoLabels(prev => ({ ...prev, [repoKey]: fresh }));
+            // Strip from any local PR that had it
+            setAllPRs(prev => prev.map(pr => {
+                if (pr._repo.owner !== owner || pr._repo.repo !== repo) return pr;
+                return { ...pr, labels: pr.labels.filter(l => l.name !== labelName) };
+            }));
+            showToast(`Label "${labelName}" deleted`, 'success');
+        } catch (e) {
+            console.error('Failed to delete label', e);
+            showToast(`Failed to delete label: ${e.message}`, 'error');
+        } finally {
+            setLabelManagerBusy(false);
+        }
+    };
+
+    // ---------------- Merge ----------------
+
+    const openMergeModal = async (pr) => {
+        setMergePR(pr);
+        setMergeDetails(null);
+        setMergeError(null);
+        setMergeDone(false);
+        setMergeCommitTitle('');
+        setMergeCommitMessage('');
+        setMergeChecking(true);
+        try {
+            const [details, repoMeta] = await Promise.all([
+                GitHubAPI.getPullRequest(pr._repo.owner, pr._repo.repo, pr.number, getReadToken()),
+                GitHubAPI.getRepository(pr._repo.owner, pr._repo.repo, getReadToken()).catch(() => null),
+            ]);
+            // GitHub may return mergeable === null briefly while the merge commit is being computed.
+            // Poll once after a short delay if so.
+            let resolved = details;
+            if (resolved.mergeable === null) {
+                await new Promise(r => setTimeout(r, 1500));
+                resolved = await GitHubAPI.getPullRequest(pr._repo.owner, pr._repo.repo, pr.number, getReadToken());
+            }
+            setMergeDetails(resolved);
+            const strategies = GitHubAPI.repoAllowedMergeStrategies(repoMeta);
+            setMergeAllowed(strategies.allowed);
+            setMergeStrategy(strategies.default);
+            setMergeCommitTitle(`${resolved.title} (#${resolved.number})`);
+        } catch (e) {
+            console.error('Failed to load merge details', e);
+            setMergeError(e.message);
+        } finally {
+            setMergeChecking(false);
+        }
+    };
+
+    const closeMergeModal = () => {
+        if (mergeBusy) return;
+        setMergePR(null);
+        setMergeDetails(null);
+        setMergeError(null);
+        setMergeDone(false);
+    };
+
+    const performMerge = async () => {
+        if (!mergePR || !mergeDetails) return;
+        const authToken = await getAuthToken();
+        if (!authToken) {
+            setMergeError('Authentication required to merge.');
+            return;
+        }
+        setMergeBusy(true);
+        setMergeError(null);
+        try {
+            const result = await GitHubAPI.mergePullRequest(
+                mergePR._repo.owner,
+                mergePR._repo.repo,
+                mergePR.number,
+                {
+                    merge_method: mergeStrategy,
+                    commit_title: mergeCommitTitle.trim() || undefined,
+                    commit_message: mergeCommitMessage.trim() || undefined,
+                    sha: mergeDetails.head?.sha,
+                },
+                authToken
+            );
+            // Refresh local PR state — when an open PR is merged it leaves the open list,
+            // so simply remove it from `allPRs`.
+            setAllPRs(prev => prev.filter(p => p._key !== mergePR._key));
+            setSelectedPRs(prev => {
+                const next = new Set(prev);
+                next.delete(mergePR._key);
+                return next;
+            });
+            setMergeDone(true);
+            showToast(`Merged #${mergePR.number} (${result?.sha?.slice(0, 7) || ''})`, 'success');
+        } catch (e) {
+            console.error('Merge failed', e);
+            // Surface known-blocker statuses with more context.
+            let msg = e.message || 'Merge failed';
+            if (e.status === 405) msg = `Pull request is not mergeable: ${msg}`;
+            if (e.status === 409) msg = `Branch state changed since loading. Refresh and retry. (${msg})`;
+            if (e.status === 403) msg = `Insufficient permissions or branch protection blocked the merge. (${msg})`;
+            setMergeError(msg);
+        } finally {
+            setMergeBusy(false);
+        }
     };
     
     // Count PRs missing approval
@@ -1865,6 +2321,22 @@ function App() {
                                 >
                                     🏷️ needs-review ({needsReviewCount})
                                 </button>
+                                <button
+                                    className={`filter-btn ${labelFilter.size > 0 || showLabelFilter ? 'active' : ''}`}
+                                    onClick={() => setShowLabelFilter(!showLabelFilter)}
+                                    title="Filter by labels"
+                                >
+                                    🏷️ Labels{labelFilter.size > 0 ? ` (${labelFilter.size})` : ''}
+                                </button>
+                                {repos.length > 0 && (
+                                    <button
+                                        className="filter-btn"
+                                        onClick={() => openLabelManager(repos[0])}
+                                        title={repos.length > 1 ? `Manage labels for ${repos[0].owner}/${repos[0].repo}` : 'Manage repo labels'}
+                                    >
+                                        ⚙️ Manage Labels
+                                    </button>
+                                )}
                                 <button className="btn" onClick={selectAll}>
                                     {selectedPRs.size === filteredPRs.length && filteredPRs.length > 0 ? '☐ Deselect All' : '☑ Select All'}
                                 </button>
@@ -1885,6 +2357,61 @@ function App() {
                                 </button>
                             </div>
                         </div>
+
+                        {/* Label filter panel */}
+                        {showLabelFilter && (
+                            <div style={{
+                                background: 'var(--bg1)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 10,
+                                padding: 14,
+                                marginBottom: 16,
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                    <span style={{ fontSize: 11, color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                        Filter by labels (any-of)
+                                    </span>
+                                    {labelFilter.size > 0 && (
+                                        <button
+                                            className="btn"
+                                            style={{ fontSize: 10, padding: '4px 8px' }}
+                                            onClick={() => setLabelFilter(new Set())}
+                                        >
+                                            Clear
+                                        </button>
+                                    )}
+                                </div>
+                                {getAllVisibleLabels().length === 0 ? (
+                                    <div style={{ fontSize: 11, color: 'var(--t3)' }}>
+                                        No labels on the loaded PRs yet.
+                                    </div>
+                                ) : (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                        {getAllVisibleLabels().map(label => {
+                                            const active = labelFilter.has(label.name.toLowerCase());
+                                            return (
+                                                <button
+                                                    key={label.id || label.name}
+                                                    onClick={() => toggleLabelFilter(label.name)}
+                                                    className="label"
+                                                    style={{
+                                                        cursor: 'pointer',
+                                                        backgroundColor: active ? `#${label.color}66` : `#${label.color}22`,
+                                                        color: `#${label.color}`,
+                                                        borderColor: `#${label.color}`,
+                                                        borderWidth: active ? 2 : 1,
+                                                        borderStyle: 'solid',
+                                                        outline: 'none',
+                                                    }}
+                                                >
+                                                    {active ? '✓ ' : ''}{label.name}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* PR List */}
                         {filteredPRs.length === 0 ? (
@@ -2008,16 +2535,36 @@ function App() {
                                                     </>
                                                 )}
                                             </div>
-                                            <a
-                                                href={pr.html_url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="btn"
-                                                onClick={(e) => e.stopPropagation()}
-                                                style={{ fontSize: 11 }}
-                                            >
-                                                🔗
-                                            </a>
+                                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }} onClick={(e) => e.stopPropagation()}>
+                                                <button
+                                                    className="btn"
+                                                    onClick={(e) => { e.stopPropagation(); openLabelEditor(pr); }}
+                                                    style={{ fontSize: 11 }}
+                                                    title="Edit labels"
+                                                >
+                                                    🏷️
+                                                </button>
+                                                <button
+                                                    className="btn"
+                                                    onClick={(e) => { e.stopPropagation(); openMergeModal(pr); }}
+                                                    style={{ fontSize: 11 }}
+                                                    title="Merge this PR"
+                                                    disabled={!isAuthConfigured()}
+                                                >
+                                                    ⤴️
+                                                </button>
+                                                <a
+                                                    href={pr.html_url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="btn"
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    style={{ fontSize: 11 }}
+                                                    title="Open on GitHub"
+                                                >
+                                                    🔗
+                                                </a>
+                                            </div>
                                         </div>
                                     </div>
                                 ))}
@@ -2513,12 +3060,559 @@ function App() {
                 </div>
             )}
 
+            {/* Per-PR Label Editor Modal */}
+            {labelEditorPR && (
+                <div className="modal-overlay" onClick={() => !labelEditorBusy && setLabelEditorPR(null)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <span className="modal-title">🏷️ Labels for #{labelEditorPR.number}</span>
+                            {!labelEditorBusy && (
+                                <button className="modal-close" onClick={() => setLabelEditorPR(null)}>×</button>
+                            )}
+                        </div>
+                        <div className="modal-body">
+                            <div style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 12 }}>
+                                {labelEditorPR._repo.owner}/{labelEditorPR._repo.repo} — {labelEditorPR.title}
+                            </div>
+
+                            {/* Available repo labels (toggle to add/remove) */}
+                            <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                Repository labels
+                            </label>
+                            {(() => {
+                                const repoKey = `${labelEditorPR._repo.owner}/${labelEditorPR._repo.repo}`;
+                                const labels = repoLabels[repoKey];
+                                if (!labels) {
+                                    return <div style={{ fontSize: 11, color: 'var(--t3)' }}>Loading…</div>;
+                                }
+                                if (labels.length === 0) {
+                                    return (
+                                        <div style={{ fontSize: 11, color: 'var(--t3)' }}>
+                                            This repository has no labels defined yet. Add a new one below — it will be created when you save.
+                                        </div>
+                                    );
+                                }
+                                return (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+                                        {labels.map(label => {
+                                            const checked = labelEditorSelected.has(label.name);
+                                            return (
+                                                <button
+                                                    key={label.id || label.name}
+                                                    className="label"
+                                                    onClick={() => {
+                                                        const next = new Set(labelEditorSelected);
+                                                        if (next.has(label.name)) next.delete(label.name);
+                                                        else next.add(label.name);
+                                                        setLabelEditorSelected(next);
+                                                    }}
+                                                    style={{
+                                                        cursor: 'pointer',
+                                                        backgroundColor: checked ? `#${label.color}66` : `#${label.color}22`,
+                                                        color: `#${label.color}`,
+                                                        borderColor: `#${label.color}`,
+                                                        borderWidth: checked ? 2 : 1,
+                                                        borderStyle: 'solid',
+                                                        outline: 'none',
+                                                    }}
+                                                    title={label.description || label.name}
+                                                >
+                                                    {checked ? '✓ ' : ''}{label.name}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })()}
+
+                            {/* Selected labels preview */}
+                            {labelEditorSelected.size > 0 && (
+                                <div style={{ marginTop: 16 }}>
+                                    <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                        Will apply ({labelEditorSelected.size})
+                                    </label>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                        {Array.from(labelEditorSelected).map(name => (
+                                            <span key={name} className="label" style={{ background: 'var(--bg3)', borderColor: 'var(--border)' }}>
+                                                {name}
+                                                <button
+                                                    onClick={() => {
+                                                        const next = new Set(labelEditorSelected);
+                                                        next.delete(name);
+                                                        setLabelEditorSelected(next);
+                                                    }}
+                                                    style={{
+                                                        background: 'none',
+                                                        border: 'none',
+                                                        color: 'var(--t2)',
+                                                        cursor: 'pointer',
+                                                        marginLeft: 6,
+                                                        fontSize: 11,
+                                                    }}
+                                                >×</button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Add new label */}
+                            <div style={{ marginTop: 16 }}>
+                                <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                    Add new label (creates it if it doesn't exist)
+                                </label>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <input
+                                        type="text"
+                                        className="input-field"
+                                        style={{ flex: 1, minWidth: 'unset' }}
+                                        placeholder="label-name"
+                                        value={labelEditorNew}
+                                        onChange={(e) => setLabelEditorNew(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                addNewLabelFromEditor();
+                                            }
+                                        }}
+                                    />
+                                    <button className="btn" onClick={addNewLabelFromEditor} disabled={!labelEditorNew.trim()}>
+                                        Add
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="modal-footer">
+                            <button className="btn" onClick={() => setLabelEditorPR(null)} disabled={labelEditorBusy}>
+                                Cancel
+                            </button>
+                            <button
+                                className="btn primary"
+                                onClick={saveLabelEditor}
+                                disabled={labelEditorBusy || !isAuthConfigured()}
+                                title={!isAuthConfigured() ? 'Configure authentication first' : ''}
+                            >
+                                {labelEditorBusy ? '⏳ Saving…' : '💾 Save Labels'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Repo-level Label Manager Modal */}
+            {labelManagerRepo && (
+                <div className="modal-overlay" onClick={() => !labelManagerBusy && setLabelManagerRepo(null)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 600 }}>
+                        <div className="modal-header">
+                            <span className="modal-title">⚙️ Manage labels — {labelManagerRepo.owner}/{labelManagerRepo.repo}</span>
+                            {!labelManagerBusy && (
+                                <button className="modal-close" onClick={() => setLabelManagerRepo(null)}>×</button>
+                            )}
+                        </div>
+                        <div className="modal-body">
+                            {repos.length > 1 && (
+                                <div style={{ marginBottom: 12 }}>
+                                    <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                        Repository
+                                    </label>
+                                    <select
+                                        className="input-field"
+                                        style={{ width: '100%', minWidth: 'unset' }}
+                                        value={`${labelManagerRepo.owner}/${labelManagerRepo.repo}`}
+                                        onChange={(e) => {
+                                            const [owner, repo] = e.target.value.split('/');
+                                            openLabelManager({ owner, repo });
+                                        }}
+                                    >
+                                        {repos.map(r => (
+                                            <option key={`${r.owner}/${r.repo}`} value={`${r.owner}/${r.repo}`}>
+                                                {r.owner}/{r.repo}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            {(() => {
+                                const repoKey = `${labelManagerRepo.owner}/${labelManagerRepo.repo}`;
+                                const labels = repoLabels[repoKey];
+                                if (!labels) return <div style={{ fontSize: 11, color: 'var(--t3)' }}>Loading…</div>;
+
+                                return (
+                                    <>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                            <span className="input-label">{labels.length} label(s)</span>
+                                            <button
+                                                className="btn"
+                                                onClick={startCreateLabel}
+                                                disabled={labelManagerBusy || !isAuthConfigured()}
+                                                style={{ fontSize: 11 }}
+                                            >
+                                                ＋ New label
+                                            </button>
+                                        </div>
+
+                                        {labels.length === 0 && labelManagerEditing !== '__new__' && (
+                                            <div style={{
+                                                fontSize: 11,
+                                                color: 'var(--t3)',
+                                                padding: '20px 12px',
+                                                background: 'var(--bg0)',
+                                                borderRadius: 6,
+                                                textAlign: 'center',
+                                            }}>
+                                                No labels defined for this repository yet. Click "New label" to create one.
+                                            </div>
+                                        )}
+
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto' }}>
+                                            {labelManagerEditing === '__new__' && (
+                                                <LabelEditorRow
+                                                    draft={labelManagerDraft}
+                                                    setDraft={setLabelManagerDraft}
+                                                    onSave={saveManagedLabel}
+                                                    onCancel={() => setLabelManagerEditing(null)}
+                                                    busy={labelManagerBusy}
+                                                    isNew={true}
+                                                />
+                                            )}
+                                            {labels.map(label => (
+                                                labelManagerEditing === label.name ? (
+                                                    <LabelEditorRow
+                                                        key={label.id || label.name}
+                                                        draft={labelManagerDraft}
+                                                        setDraft={setLabelManagerDraft}
+                                                        onSave={saveManagedLabel}
+                                                        onCancel={() => setLabelManagerEditing(null)}
+                                                        busy={labelManagerBusy}
+                                                        isNew={false}
+                                                    />
+                                                ) : (
+                                                    <div
+                                                        key={label.id || label.name}
+                                                        style={{
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: 10,
+                                                            padding: '8px 10px',
+                                                            background: 'var(--bg2)',
+                                                            borderRadius: 6,
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className="label"
+                                                            style={{
+                                                                backgroundColor: `#${label.color}22`,
+                                                                color: `#${label.color}`,
+                                                                borderColor: `#${label.color}`,
+                                                            }}
+                                                        >
+                                                            {label.name}
+                                                        </span>
+                                                        {label.description && (
+                                                            <span style={{ fontSize: 11, color: 'var(--t3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                {label.description}
+                                                            </span>
+                                                        )}
+                                                        <button
+                                                            className="btn"
+                                                            style={{ fontSize: 10, padding: '4px 8px', marginLeft: 'auto' }}
+                                                            onClick={() => startEditLabel(label)}
+                                                            disabled={labelManagerBusy || !isAuthConfigured()}
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                        <button
+                                                            className="btn danger"
+                                                            style={{ fontSize: 10, padding: '4px 8px' }}
+                                                            onClick={() => deleteManagedLabel(label.name)}
+                                                            disabled={labelManagerBusy || !isAuthConfigured()}
+                                                        >
+                                                            Delete
+                                                        </button>
+                                                    </div>
+                                                )
+                                            ))}
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </div>
+                        <div className="modal-footer">
+                            <button className="btn primary" onClick={() => setLabelManagerRepo(null)} disabled={labelManagerBusy}>
+                                Done
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Merge Modal */}
+            {mergePR && (
+                <div className="modal-overlay" onClick={closeMergeModal}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <span className="modal-title">⤴️ Merge #{mergePR.number}</span>
+                            {!mergeBusy && (
+                                <button className="modal-close" onClick={closeMergeModal}>×</button>
+                            )}
+                        </div>
+                        <div className="modal-body">
+                            <div style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 12 }}>
+                                {mergePR._repo.owner}/{mergePR._repo.repo} — {mergePR.title}
+                            </div>
+
+                            {mergeChecking && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--t2)' }}>
+                                    <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+                                    Checking mergeability…
+                                </div>
+                            )}
+
+                            {!mergeChecking && mergeDetails && !mergeDone && (
+                                <>
+                                    {(() => {
+                                        const det = mergeDetails;
+                                        const blocked = det.mergeable === false;
+                                        const checking = det.mergeable === null;
+                                        const state = det.mergeable_state || 'unknown';
+                                        const ok = det.mergeable === true && ['clean', 'has_hooks', 'unstable'].includes(state);
+                                        const badgeColor = ok ? 'var(--green)' : (checking ? 'var(--orange)' : 'var(--red)');
+                                        const badgeBg = ok ? 'var(--green-bg)' : (checking ? 'var(--orange-bg)' : 'var(--red-bg)');
+                                        const blockerMessages = {
+                                            dirty: 'There are conflicts that must be resolved before merging.',
+                                            blocked: 'Merge is blocked — required reviews, status checks, or branch protection rules are not satisfied.',
+                                            behind: 'The branch is behind the base branch and must be updated first.',
+                                            draft: 'This PR is in draft state. Mark it ready for review to merge.',
+                                            unstable: 'Some non-required checks are failing, but the merge is allowed.',
+                                            unknown: 'GitHub could not determine the merge state. Try again in a moment.',
+                                            has_hooks: 'Mergeable with active hooks.',
+                                            clean: 'All checks passing — ready to merge.',
+                                        };
+                                        return (
+                                            <>
+                                                <div style={{
+                                                    padding: '10px 12px',
+                                                    background: badgeBg,
+                                                    border: `1px solid ${badgeColor}`,
+                                                    borderRadius: 6,
+                                                    fontSize: 12,
+                                                    color: badgeColor,
+                                                    marginBottom: 16,
+                                                }}>
+                                                    <strong>Status:</strong> {state}
+                                                    <div style={{ fontSize: 11, marginTop: 4, opacity: 0.9 }}>
+                                                        {blockerMessages[state] || `mergeable=${det.mergeable}, state=${state}`}
+                                                    </div>
+                                                </div>
+
+                                                {/* Strategy picker */}
+                                                <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                                    Merge strategy
+                                                </label>
+                                                <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+                                                    {['merge', 'squash', 'rebase'].map(s => {
+                                                        const enabled = mergeAllowed.includes(s);
+                                                        return (
+                                                            <button
+                                                                key={s}
+                                                                className={`filter-btn ${mergeStrategy === s ? 'active' : ''}`}
+                                                                onClick={() => enabled && setMergeStrategy(s)}
+                                                                disabled={!enabled || mergeBusy}
+                                                                style={{
+                                                                    flex: 1,
+                                                                    justifyContent: 'center',
+                                                                    opacity: enabled ? 1 : 0.4,
+                                                                    cursor: enabled ? 'pointer' : 'not-allowed',
+                                                                }}
+                                                                title={enabled ? '' : 'Disabled by repository settings'}
+                                                            >
+                                                                {s === 'merge' && '🔀 Create merge commit'}
+                                                                {s === 'squash' && '🟪 Squash and merge'}
+                                                                {s === 'rebase' && '🔁 Rebase and merge'}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+
+                                                {mergeStrategy !== 'rebase' && (
+                                                    <>
+                                                        <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                                            Commit title
+                                                        </label>
+                                                        <input
+                                                            type="text"
+                                                            className="input-field"
+                                                            style={{ width: '100%', minWidth: 'unset', marginBottom: 12 }}
+                                                            value={mergeCommitTitle}
+                                                            onChange={(e) => setMergeCommitTitle(e.target.value)}
+                                                            disabled={mergeBusy}
+                                                        />
+                                                        <label className="input-label" style={{ marginBottom: 6, display: 'block' }}>
+                                                            Commit message (optional)
+                                                        </label>
+                                                        <textarea
+                                                            className="comment-input"
+                                                            style={{ marginTop: 0 }}
+                                                            value={mergeCommitMessage}
+                                                            onChange={(e) => setMergeCommitMessage(e.target.value)}
+                                                            placeholder="Detail message…"
+                                                            disabled={mergeBusy}
+                                                        />
+                                                    </>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
+                                </>
+                            )}
+
+                            {!mergeChecking && !mergeDetails && mergeError && !mergeDone && (
+                                <div style={{
+                                    padding: '10px 12px',
+                                    background: 'var(--red-bg)',
+                                    border: '1px solid var(--red)',
+                                    borderRadius: 6,
+                                    fontSize: 12,
+                                    color: 'var(--red)',
+                                }}>
+                                    ⚠️ {mergeError}
+                                </div>
+                            )}
+
+                            {mergeDone && (
+                                <div style={{
+                                    padding: '14px 16px',
+                                    background: 'var(--green-bg)',
+                                    border: '1px solid var(--green)',
+                                    borderRadius: 6,
+                                    fontSize: 13,
+                                    color: 'var(--green)',
+                                    textAlign: 'center',
+                                }}>
+                                    ✓ Pull request merged
+                                </div>
+                            )}
+
+                            {mergeError && mergeDetails && !mergeDone && (
+                                <div style={{
+                                    marginTop: 12,
+                                    padding: '10px 12px',
+                                    background: 'var(--red-bg)',
+                                    border: '1px solid var(--red)',
+                                    borderRadius: 6,
+                                    fontSize: 11,
+                                    color: 'var(--red)',
+                                    wordBreak: 'break-word',
+                                }}>
+                                    ⚠️ {mergeError}
+                                </div>
+                            )}
+                        </div>
+                        <div className="modal-footer">
+                            {mergeDone ? (
+                                <button className="btn primary" onClick={closeMergeModal}>
+                                    Close
+                                </button>
+                            ) : (
+                                <>
+                                    <button className="btn" onClick={closeMergeModal} disabled={mergeBusy}>
+                                        Cancel
+                                    </button>
+                                    <button
+                                        className="btn primary"
+                                        onClick={performMerge}
+                                        disabled={
+                                            mergeBusy ||
+                                            mergeChecking ||
+                                            !mergeDetails ||
+                                            mergeDetails.mergeable !== true ||
+                                            !isAuthConfigured()
+                                        }
+                                        title={
+                                            !isAuthConfigured() ? 'Configure authentication first' :
+                                            !mergeDetails ? 'Loading…' :
+                                            mergeDetails.mergeable !== true ? 'PR is not currently mergeable' : ''
+                                        }
+                                    >
+                                        {mergeBusy ? '⏳ Merging…' : `⤴️ Merge (${mergeStrategy})`}
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Toast */}
             {toast && (
                 <div className={`toast ${toast.type}`}>
                     {toast.type === 'success' ? '✅' : '❌'} {toast.message}
                 </div>
             )}
+        </div>
+    );
+}
+
+// Helper component used by the Label Manager modal — kept here to match
+// the project's "everything in one file" convention.
+function LabelEditorRow({ draft, setDraft, onSave, onCancel, busy, isNew }) {
+    return (
+        <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            padding: 10,
+            background: 'var(--bg0)',
+            border: '1px solid var(--acc)',
+            borderRadius: 6,
+        }}>
+            <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                    type="text"
+                    className="input-field"
+                    style={{ flex: 2, minWidth: 'unset' }}
+                    placeholder="label-name"
+                    value={draft.name}
+                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    disabled={busy}
+                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input
+                        type="color"
+                        value={`#${(draft.color || 'cccccc').replace(/^#/, '')}`}
+                        onChange={(e) => setDraft({ ...draft, color: e.target.value.replace(/^#/, '') })}
+                        disabled={busy}
+                        style={{ width: 32, height: 32, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                    />
+                    <input
+                        type="text"
+                        className="input-field"
+                        style={{ width: 90, minWidth: 'unset', fontFamily: 'monospace', fontSize: 11 }}
+                        placeholder="ff7b72"
+                        value={draft.color || ''}
+                        onChange={(e) => setDraft({ ...draft, color: e.target.value.replace(/^#/, '') })}
+                        disabled={busy}
+                    />
+                </div>
+            </div>
+            <input
+                type="text"
+                className="input-field"
+                style={{ width: '100%', minWidth: 'unset' }}
+                placeholder="Description (optional)"
+                value={draft.description || ''}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                disabled={busy}
+            />
+            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                <button className="btn" onClick={onCancel} disabled={busy} style={{ fontSize: 11 }}>
+                    Cancel
+                </button>
+                <button className="btn primary" onClick={onSave} disabled={busy || !draft.name.trim()} style={{ fontSize: 11 }}>
+                    {busy ? '⏳' : (isNew ? 'Create' : 'Save')}
+                </button>
+            </div>
         </div>
     );
 }

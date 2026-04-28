@@ -1,0 +1,13 @@
+{
+  "name": "github-pr-approver",
+  "version": "0.1.0",
+  "description": "Bulk approve, label, and merge GitHub PRs from a single-page web app.",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/api.test.js tests/structure.test.js tests/jsx-parse.test.js"
+  },
+  "devDependencies": {
+    "@babel/parser": "^7.24.0"
+  },
+  "license": "MIT"
+}
