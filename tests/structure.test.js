@@ -39,6 +39,10 @@ test('App renders the new UI surfaces', () => {
     assert.match(html, /openLabelEditor/);
     // The repo-level manager
     assert.match(html, /openLabelManager/);
+    // Bulk merge entry points
+    assert.match(html, /openBulkMerge/);
+    assert.match(html, /runBulkMerge/);
+    assert.match(html, /Merge Selected/);
 });
 
 test('Babel/React script tags are still present (no accidental breakage)', () => {

@@ -1291,7 +1291,7 @@ function App() {
     const [labelManagerDraft, setLabelManagerDraft] = useState({ name: '', color: '', description: '' });
     const [labelManagerBusy, setLabelManagerBusy] = useState(false);
 
-    // Merge state
+    // Merge state (single PR)
     const [mergePR, setMergePR] = useState(null); // PR object being merged
     const [mergeDetails, setMergeDetails] = useState(null); // full PR detail with mergeable/mergeable_state
     const [mergeStrategy, setMergeStrategy] = useState('merge');
@@ -1302,6 +1302,13 @@ function App() {
     const [mergeBusy, setMergeBusy] = useState(false);
     const [mergeError, setMergeError] = useState(null);
     const [mergeDone, setMergeDone] = useState(false);
+
+    // Bulk-merge state
+    const [showBulkMerge, setShowBulkMerge] = useState(false);
+    const [bulkMergeStrategy, setBulkMergeStrategy] = useState('merge');
+    const [bulkMergeAllowed, setBulkMergeAllowed] = useState(['merge', 'squash', 'rebase']);
+    const [bulkMergeRunning, setBulkMergeRunning] = useState(false);
+    const [bulkMergeProgress, setBulkMergeProgress] = useState({ current: 0, total: 0, results: [] });
 
     // Show toast notification
     const showToast = useCallback((message, type = 'success') => {
@@ -1918,6 +1925,155 @@ function App() {
             setMergeBusy(false);
         }
     };
+
+    // ---------------- Bulk Merge ----------------
+
+    // Open the bulk-merge modal: precompute the intersection of merge strategies
+    // allowed across all repos involved in the selection.
+    const openBulkMerge = async () => {
+        if (selectedPRs.size === 0) return;
+        setShowBulkMerge(true);
+        setBulkMergeProgress({ current: 0, total: 0, results: [] });
+
+        const selectedRepos = new Map(); // "owner/repo" -> {owner, repo}
+        for (const key of selectedPRs) {
+            const pr = allPRs.find(p => p._key === key);
+            if (pr) selectedRepos.set(`${pr._repo.owner}/${pr._repo.repo}`, pr._repo);
+        }
+        try {
+            const repoMetas = await Promise.all(
+                Array.from(selectedRepos.values()).map(r =>
+                    GitHubAPI.getRepository(r.owner, r.repo, getReadToken()).catch(() => null)
+                )
+            );
+            // Intersect allowed strategies — the bulk operation must use a single
+            // strategy, so it has to be one that every involved repo permits.
+            let intersection = ['merge', 'squash', 'rebase'];
+            for (const meta of repoMetas) {
+                const { allowed } = GitHubAPI.repoAllowedMergeStrategies(meta);
+                intersection = intersection.filter(s => allowed.includes(s));
+            }
+            if (intersection.length === 0) intersection = ['merge'];
+            setBulkMergeAllowed(intersection);
+            // Default to squash if available, else first allowed.
+            setBulkMergeStrategy(intersection.includes('squash') ? 'squash' : intersection[0]);
+        } catch (e) {
+            console.error('Failed to inspect repo merge settings', e);
+            setBulkMergeAllowed(['merge', 'squash', 'rebase']);
+            setBulkMergeStrategy('merge');
+        }
+    };
+
+    const closeBulkMerge = () => {
+        if (bulkMergeRunning) return;
+        setShowBulkMerge(false);
+        setBulkMergeProgress({ current: 0, total: 0, results: [] });
+    };
+
+    const runBulkMerge = async () => {
+        if (selectedPRs.size === 0) return;
+        const authToken = await getAuthToken();
+        if (!authToken) {
+            showToast('Authentication failed. Please check your credentials.', 'error');
+            return;
+        }
+        setBulkMergeRunning(true);
+        const prKeys = Array.from(selectedPRs);
+        setBulkMergeProgress({ current: 0, total: prKeys.length, results: [] });
+        const results = [];
+        const mergedKeys = [];
+
+        for (let i = 0; i < prKeys.length; i++) {
+            const prKey = prKeys[i];
+            const pr = allPRs.find(p => p._key === prKey);
+            if (!pr) {
+                results.push({ prKey, title: 'Unknown', success: false, error: 'PR not found' });
+                setBulkMergeProgress({ current: i + 1, total: prKeys.length, results: [...results] });
+                continue;
+            }
+            const repoLabel = `${pr._repo.owner}/${pr._repo.repo}`;
+            try {
+                // Fetch full details for mergeability + head SHA. Poll once if GitHub is
+                // still computing the merge state (mergeable === null).
+                let details = await GitHubAPI.getPullRequest(pr._repo.owner, pr._repo.repo, pr.number, authToken);
+                if (details.mergeable === null) {
+                    await new Promise(r => setTimeout(r, 1500));
+                    details = await GitHubAPI.getPullRequest(pr._repo.owner, pr._repo.repo, pr.number, authToken);
+                }
+                if (details.mergeable !== true) {
+                    const reason = details.mergeable_state || 'not mergeable';
+                    results.push({
+                        prKey,
+                        prNumber: pr.number,
+                        repo: repoLabel,
+                        title: pr.title,
+                        success: false,
+                        skipped: true,
+                        error: `Skipped — state: ${reason}`,
+                    });
+                } else {
+                    const result = await GitHubAPI.mergePullRequest(
+                        pr._repo.owner,
+                        pr._repo.repo,
+                        pr.number,
+                        {
+                            merge_method: bulkMergeStrategy,
+                            commit_title: `${details.title} (#${details.number})`,
+                            sha: details.head?.sha,
+                        },
+                        authToken
+                    );
+                    mergedKeys.push(prKey);
+                    results.push({
+                        prKey,
+                        prNumber: pr.number,
+                        repo: repoLabel,
+                        title: pr.title,
+                        success: true,
+                        sha: result?.sha,
+                    });
+                }
+            } catch (e) {
+                console.error(`[Bulk merge] ${prKey} failed:`, e);
+                let msg = e.message || 'Merge failed';
+                if (e.status === 405) msg = `Not mergeable: ${msg}`;
+                if (e.status === 409) msg = `Branch state changed since loading: ${msg}`;
+                if (e.status === 403) msg = `Permissions or branch protection blocked the merge: ${msg}`;
+                results.push({
+                    prKey,
+                    prNumber: pr.number,
+                    repo: repoLabel,
+                    title: pr.title,
+                    success: false,
+                    error: msg,
+                });
+            }
+            setBulkMergeProgress({ current: i + 1, total: prKeys.length, results: [...results] });
+        }
+
+        // Remove successfully-merged PRs from the open list and clear them from selection.
+        if (mergedKeys.length > 0) {
+            const mergedSet = new Set(mergedKeys);
+            setAllPRs(prev => prev.filter(p => !mergedSet.has(p._key)));
+            setSelectedPRs(prev => {
+                const next = new Set(prev);
+                for (const k of mergedKeys) next.delete(k);
+                return next;
+            });
+        }
+
+        const successCount = results.filter(r => r.success).length;
+        showToast(
+            `Merged ${successCount} of ${results.length} PRs`,
+            successCount === results.length ? 'success' : 'error'
+        );
+        setBulkMergeRunning(false);
+        // Auto-close after a moment so the user can read the results, matching the approve flow.
+        setTimeout(() => {
+            setShowBulkMerge(false);
+            setBulkMergeProgress({ current: 0, total: 0, results: [] });
+        }, 3500);
+    };
     
     // Count PRs missing approval
     const missingApprovalCount = allPRs.filter(pr => {
@@ -2354,6 +2510,14 @@ function App() {
                                     disabled={selectedPRs.size === 0}
                                 >
                                     ✅ Approve Selected ({selectedPRs.size})
+                                </button>
+                                <button
+                                    className="btn primary"
+                                    onClick={openBulkMerge}
+                                    disabled={selectedPRs.size === 0 || !isAuthConfigured()}
+                                    title={!isAuthConfigured() ? 'Configure authentication to merge' : ''}
+                                >
+                                    ⤴️ Merge Selected ({selectedPRs.size})
                                 </button>
                             </div>
                         </div>
@@ -3538,6 +3702,179 @@ function App() {
                                         {mergeBusy ? '⏳ Merging…' : `⤴️ Merge (${mergeStrategy})`}
                                     </button>
                                 </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Bulk Merge Modal */}
+            {showBulkMerge && (
+                <div className="modal-overlay" onClick={closeBulkMerge}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <span className="modal-title">⤴️ Merge Pull Requests</span>
+                            {!bulkMergeRunning && (
+                                <button className="modal-close" onClick={closeBulkMerge}>×</button>
+                            )}
+                        </div>
+                        <div className="modal-body">
+                            <div className="approval-summary">
+                                <div className="approval-count" style={{ color: 'var(--acc)' }}>{selectedPRs.size}</div>
+                                <div className="approval-text">pull requests will be merged</div>
+                            </div>
+
+                            {/* Progress / results once the run starts */}
+                            {(bulkMergeRunning || bulkMergeProgress.results.length > 0) && (
+                                <>
+                                    <div className="progress-bar">
+                                        <div
+                                            className="progress-fill"
+                                            style={{
+                                                width: `${bulkMergeProgress.total === 0 ? 0 : (bulkMergeProgress.current / bulkMergeProgress.total) * 100}%`,
+                                                background: 'var(--acc)',
+                                            }}
+                                        />
+                                    </div>
+                                    <div style={{ fontSize: 12, color: 'var(--t2)', marginTop: 8, textAlign: 'center' }}>
+                                        {bulkMergeRunning
+                                            ? `Processing ${bulkMergeProgress.current} of ${bulkMergeProgress.total}…`
+                                            : `Completed: ${bulkMergeProgress.results.filter(r => r.success).length} of ${bulkMergeProgress.results.length} merged`
+                                        }
+                                    </div>
+                                    <div className="approval-list" style={{ marginTop: 16 }}>
+                                        {bulkMergeProgress.results.map((r, i) => (
+                                            <div key={i} className="approval-item" style={{
+                                                flexDirection: 'column',
+                                                alignItems: 'flex-start',
+                                                background: r.success ? 'var(--green-bg)' : (r.skipped ? 'var(--orange-bg)' : 'var(--red-bg)'),
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
+                                                    <span className="approval-item-status">
+                                                        {r.success ? '✅' : (r.skipped ? '⏭️' : '❌')}
+                                                    </span>
+                                                    <span className="approval-item-name" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                        <span>
+                                                            {repos.length > 1 && r.repo && (
+                                                                <span style={{ fontSize: 9, color: 'var(--t3)', marginRight: 6 }}>
+                                                                    {r.repo}
+                                                                </span>
+                                                            )}
+                                                            #{r.prNumber}
+                                                            {r.success && r.sha && (
+                                                                <span style={{ fontSize: 10, color: 'var(--green)', marginLeft: 8 }}>
+                                                                    {r.sha.slice(0, 7)}
+                                                                </span>
+                                                            )}
+                                                        </span>
+                                                        <span style={{ fontSize: 11, color: r.success ? 'var(--green)' : (r.skipped ? 'var(--orange)' : 'var(--red)') }}>
+                                                            {r.title}
+                                                        </span>
+                                                    </span>
+                                                </div>
+                                                {r.error && (
+                                                    <div style={{
+                                                        fontSize: 10,
+                                                        color: r.skipped ? 'var(--orange)' : 'var(--red)',
+                                                        marginTop: 6,
+                                                        marginLeft: 24,
+                                                        wordBreak: 'break-word',
+                                                    }}>
+                                                        {r.error}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Pre-run UI */}
+                            {!bulkMergeRunning && bulkMergeProgress.results.length === 0 && (
+                                <>
+                                    <div className="approval-list">
+                                        {Array.from(selectedPRs).map(prKey => {
+                                            const pr = allPRs.find(p => p._key === prKey);
+                                            return (
+                                                <div key={prKey} className="approval-item">
+                                                    <span className="approval-item-status">📋</span>
+                                                    <span className="approval-item-name" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                        <span>
+                                                            {repos.length > 1 && (
+                                                                <span style={{ fontSize: 9, color: 'var(--t3)', marginRight: 6 }}>
+                                                                    {pr?._repo?.owner}/{pr?._repo?.repo}
+                                                                </span>
+                                                            )}
+                                                            #{pr?.number}
+                                                        </span>
+                                                        <span style={{ fontSize: 11, color: 'var(--t1)' }}>{pr?.title}</span>
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Strategy picker — restricted to strategies allowed by every involved repo */}
+                                    <div style={{ marginTop: 20 }}>
+                                        <label className="input-label" style={{ marginBottom: 8, display: 'block' }}>
+                                            Merge strategy
+                                        </label>
+                                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                            {['merge', 'squash', 'rebase'].map(s => {
+                                                const enabled = bulkMergeAllowed.includes(s);
+                                                return (
+                                                    <button
+                                                        key={s}
+                                                        className={`filter-btn ${bulkMergeStrategy === s ? 'active' : ''}`}
+                                                        onClick={() => enabled && setBulkMergeStrategy(s)}
+                                                        disabled={!enabled}
+                                                        style={{
+                                                            flex: 1,
+                                                            justifyContent: 'center',
+                                                            opacity: enabled ? 1 : 0.4,
+                                                            cursor: enabled ? 'pointer' : 'not-allowed',
+                                                        }}
+                                                        title={enabled ? '' : 'Not allowed by at least one of the selected repositories'}
+                                                    >
+                                                        {s === 'merge' && '🔀 Create merge commit'}
+                                                        {s === 'squash' && '🟪 Squash and merge'}
+                                                        {s === 'rebase' && '🔁 Rebase and merge'}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 8, lineHeight: 1.5 }}>
+                                            Each PR will be re-checked for mergeability before merging — PRs that aren't mergeable (conflicts, failing required checks, draft, behind base) will be skipped, not failed.
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                        <div className="modal-footer">
+                            {!bulkMergeRunning && bulkMergeProgress.results.length === 0 && (
+                                <>
+                                    <button className="btn" onClick={closeBulkMerge}>
+                                        Cancel
+                                    </button>
+                                    <button
+                                        className="btn primary"
+                                        onClick={runBulkMerge}
+                                        disabled={!isAuthConfigured() || appTokenLoading || selectedPRs.size === 0}
+                                        title={!isAuthConfigured() ? 'Configure authentication first' : ''}
+                                    >
+                                        {appTokenLoading ? '⏳ Authenticating…' : `⤴️ Merge ${selectedPRs.size} PRs (${bulkMergeStrategy})`}
+                                    </button>
+                                </>
+                            )}
+                            {!bulkMergeRunning && bulkMergeProgress.results.length > 0 && (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--t3)' }}>
+                                        Closing automatically…
+                                    </span>
+                                    <button className="btn primary" onClick={closeBulkMerge}>
+                                        Close Now
+                                    </button>
+                                </div>
                             )}
                         </div>
                     </div>
